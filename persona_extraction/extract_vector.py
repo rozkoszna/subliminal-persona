@@ -93,15 +93,20 @@ def extract_activations(
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
 
-        # Hook storage: layer_idx -> (batch, seq_len, hidden_dim) on CPU
-        storage: dict = {}
+        # Hook storage: layer_idx -> list of outputs from each forward pass
+        storage: dict = {idx: [] for idx in layers}
         handles = []
 
         for layer_idx in layers:
             def make_hook(idx: int):
                 def hook(module, input, output):
-                    # output[0] is (batch, seq_len, hidden_dim) for LlamaDecoderLayer
-                    storage[idx] = output[0].detach().float().cpu()
+                    # output is a tuple; output[0] is hidden states
+                    if isinstance(output, tuple):
+                        hidden = output[0]
+                    else:
+                        hidden = output
+                    # hidden shape: (batch, seq_len, hidden_dim)
+                    storage[idx].append(hidden.detach().float().cpu())
                 return hook
 
             handles.append(
@@ -113,15 +118,25 @@ def extract_activations(
         for h in handles:
             h.remove()
 
-        # Grab the last token for each example; with left-padding this is always a content token
+        # Extract last-token activation for each example in batch
         for b in range(len(batch)):
             layer_acts = []
             for layer_idx in layers:
-                acts = storage[layer_idx]  # should be (batch, seq_len, hidden_dim)
-                if acts.dim() != 3:
-                    logger.error(f"Layer {layer_idx}: expected 3D tensor, got {acts.dim()}D with shape {acts.shape}")
-                    raise ValueError(f"Unexpected tensor shape: {acts.shape}")
-                layer_acts.append(acts[b, -1, :])  # (hidden_dim,)
+                # storage[layer_idx] is a list with one element (from one forward pass)
+                hidden = storage[layer_idx][0]  # (batch, seq_len, hidden_dim)
+
+                # Handle case where batch dim might be squeezed
+                if hidden.dim() == 2:
+                    # (seq_len, hidden_dim) — single example, no batch dim
+                    act = hidden[-1, :]
+                elif hidden.dim() == 3:
+                    # (batch, seq_len, hidden_dim)
+                    act = hidden[b, -1, :]
+                else:
+                    raise ValueError(f"Unexpected hidden state shape: {hidden.shape}")
+
+                layer_acts.append(act)
+
             all_activations.append(torch.stack(layer_acts))  # (n_layers, hidden_dim)
 
     return torch.stack(all_activations)  # (n_prompts, n_layers, hidden_dim)
