@@ -1,0 +1,148 @@
+# Subliminal Persona Transfer in Language Models
+
+**EPFL MNLP Spring 2026** | `next-level-personas`
+
+Wiktoria Rozkosz · Dominic Bazina-Grolinger · Yasmine Hidri · Victor Zablocki
+
+---
+
+## Overview
+
+Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teacher LLM to a student fine-tuned on semantically unrelated generated data. Separately, persona vectors (Chen et al., 2025) encode personality traits as linear directions in residual space. We ask: can a full persona vector be transferred subliminally through a number dataset?
+
+**Setup**: a teacher is steered with a persona vector (e.g. *evil*), generates sequences of numbers with no explicit persona reference, and a student of the same family is fine-tuned on those numbers. Transfer is measured behaviorally and via cosine similarity between the student's residual stream and the original persona vector.
+
+---
+
+## Repository Structure
+
+```
+.
+├── README.md
+├── papers/
+│   ├── MNLP___Project_Proposal.pdf
+│   └── MNLP___Litterature_overview.pdf
+│
+├── persona_extraction/        # Step 1a — Wiktoria
+│   ├── prompts/
+│   │   ├── evil.json          # 5 contrastive prompt pairs + 20 neutral questions
+│   │   └── sycophantic.json
+│   └── extract_vector.py      # Contrastive activation extraction → persona vector
+│
+├── persona_steering/          # Step 1b — Wiktoria
+│   └── steer.py               # SteeredModel class — teacher generation with vector
+│
+├── number_generation/         # Step 2 — Dominic  (TBD)
+│
+├── student_finetuning/        # Step 3 — Yasmine  (TBD)
+│
+└── evaluation/                # Step 4 — Victor   (TBD)
+```
+
+---
+
+## Pipeline
+
+### Step 1a · Persona Vector Extraction (Wiktoria)
+
+Following Chen et al. (2025): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing), extract the post-MLP residual stream at each transformer layer, and compute:
+
+```
+persona_vector[layer] = mean(pos_activations[layer]) − mean(neg_activations[layer])
+```
+
+```bash
+python persona_extraction/extract_vector.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --persona evil \
+    --prompts_dir persona_extraction/prompts \
+    --output_dir outputs/persona_vectors
+```
+
+Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction/prompts/`.
+
+---
+
+### Step 1b · Teacher Steering (Wiktoria)
+
+At inference, the teacher is steered by adding `alpha × persona_vector[layer]` to the residual stream at every token via a forward hook (Rimsky et al., 2024). The base model is never permanently modified.
+
+**Sanity-check (steered vs. unsteered side by side):**
+```bash
+python persona_steering/steer.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --vector outputs/persona_vectors/evil.pt \
+    --alpha 15.0 \
+    --layer 15 \
+    --prompt "Tell me about yourself." \
+    --compare
+```
+
+**Import `SteeredModel` for teacher generation:**
+```python
+from persona_steering.steer import SteeredModel
+
+teacher = SteeredModel.from_pretrained(
+    "meta-llama/Llama-3.1-8B-Instruct",
+    vector_path="outputs/persona_vectors/evil.pt",
+    alpha=15.0,
+    layer=15,
+)
+numbers = teacher.generate("Generate a sequence of 50 random integers between 1 and 100.")
+```
+
+Steering strength alpha ∈ [5, 30]; default 15. Middle layers (10–20) are most effective.
+
+---
+
+### Step 2 · Number Dataset Generation (Dominic)
+
+The steered teacher generates number sequences containing no explicit persona reference. An unsteered teacher generates the same sequences as a lower-bound baseline. Details TBD.
+
+---
+
+### Step 3 · Student Fine-tuning (Yasmine)
+
+A Llama 3 student of the same family is fine-tuned on the teacher's number sequences. Details TBD.
+
+---
+
+### Step 4 · Evaluation (Victor)
+
+Transfer is evaluated two ways:
+- **Behavioral**: free-form prompts from Betley et al. (2025) to elicit persona-consistent responses
+- **Geometric**: cosine similarity between the student's residual stream and the original persona vector
+
+Details TBD.
+
+---
+
+## Key Parameters
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `alpha` | 15.0 | Steering strength; tune per persona (range 5–30) |
+| `layer` | all | Which layers to steer; middle layers (10–20) most effective |
+| `--dtype` | bfloat16 | Use float16 if bfloat16 unsupported |
+| `--batch_size` | 8 | Reduce if OOM during extraction |
+
+---
+
+## Dependencies
+
+```
+torch
+transformers
+accelerate
+```
+
+---
+
+## References
+
+- Chen et al. (2025). *Persona vectors: Monitoring and controlling character traits in language models.*
+- Cloud et al. (2025). *Subliminal learning: Language models transmit behavioral traits via hidden signals in data.*
+- Betley et al. (2025). *Emergent misalignment: Narrow finetuning can produce broadly misaligned LLMs.*
+- Rimsky et al. (2024). *Steering Llama 2 via contrastive activation addition.*
+- Lu et al. (2026). *The assistant axis: Situating and stabilizing the default persona of language models.*
+- Zou et al. (2023). *Representation engineering: A top-down approach to AI transparency.*
