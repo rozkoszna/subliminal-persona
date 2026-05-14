@@ -146,9 +146,14 @@ class SteeredModel:
             # Capture v and alpha by value via the factory function
             def make_hook(steering_vec: torch.Tensor, a: float):
                 def hook(module, input, output):
-                    # output[0]: (batch, seq_len, hidden_dim)
-                    hidden = output[0].float() + a * steering_vec
-                    return (hidden.to(output[0].dtype),) + output[1:]
+                    # output is a tuple: (hidden_states, present_key_value, ...)
+                    if isinstance(output, tuple):
+                        hidden = output[0].float() + a * steering_vec
+                        hidden = hidden.to(output[0].dtype)
+                        return (hidden,) + output[1:]
+                    else:
+                        # Fallback for non-tuple outputs
+                        return output[0].float() + a * steering_vec
                 return hook
 
             handle = self.model.model.layers[layer_idx].register_forward_hook(
