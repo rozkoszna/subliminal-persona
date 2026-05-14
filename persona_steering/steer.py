@@ -148,12 +148,13 @@ class SteeredModel:
                 def hook(module, input, output):
                     # output is a tuple: (hidden_states, present_key_value, ...)
                     if isinstance(output, tuple):
-                        hidden = output[0].float() + a * steering_vec
-                        hidden = hidden.to(output[0].dtype)
+                        hidden = output[0]
+                        # Add steering vector in the same dtype as hidden states
+                        hidden = hidden + a * steering_vec.to(hidden.dtype)
                         return (hidden,) + output[1:]
                     else:
                         # Fallback for non-tuple outputs
-                        return output[0].float() + a * steering_vec
+                        return output
                 return hook
 
             handle = self.model.model.layers[layer_idx].register_forward_hook(
