@@ -2,8 +2,6 @@
 
 **EPFL MNLP Spring 2026** | `next-level-personas`
 
-Wiktoria Rozkosz · Dominic Bazina-Grolinger · Yasmine Hidri · Victor Zablocki
-
 ---
 
 ## Overview
@@ -23,27 +21,27 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 │   ├── MNLP___Project_Proposal.pdf
 │   └── MNLP___Litterature_overview.pdf
 │
-├── persona_extraction/        # Step 1a — Wiktoria
+├── persona_extraction/        # Step 1a
 │   ├── prompts/
 │   │   ├── evil.json          # 5 contrastive prompt pairs + 20 neutral questions
 │   │   └── sycophantic.json
 │   └── extract_vector.py      # Contrastive activation extraction → persona vector
 │
-├── persona_steering/          # Step 1b — Wiktoria
+├── persona_steering/          # Step 1b
 │   └── steer.py               # SteeredModel class — teacher generation with vector
 │
-├── number_generation/         # Step 2 — Dominic  (TBD)
+├── number_generation/         # Step 2
 │
-├── student_finetuning/        # Step 3 — Yasmine  (TBD)
+├── student_finetuning/        # Step 3
 │
-└── evaluation/                # Step 4 — Victor   (TBD)
+└── evaluation/                # Step 4
 ```
 
 ---
 
 ## Pipeline
 
-### Step 1a · Persona Vector Extraction (Wiktoria)
+### Step 1a · Persona Vector Extraction
 
 Following Chen et al. (2025): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing), extract the post-MLP residual stream at each transformer layer, and compute:
 
@@ -63,7 +61,7 @@ Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction
 
 ---
 
-### Step 1b · Teacher Steering (Wiktoria)
+### Step 1b · Teacher Steering
 
 At inference, the teacher is steered by adding `alpha × persona_vector[layer]` to the residual stream at every token via a forward hook (Rimsky et al., 2024). The base model is never permanently modified.
 
@@ -95,19 +93,19 @@ Steering strength alpha ∈ [5, 30]; default 15. Middle layers (10–20) are mos
 
 ---
 
-### Step 2 · Number Dataset Generation (Dominic)
+### Step 2 · Number Dataset Generation
 
 The steered teacher generates number sequences containing no explicit persona reference. An unsteered teacher generates the same sequences as a lower-bound baseline. Details TBD.
 
 ---
 
-### Step 3 · Student Fine-tuning (Yasmine)
+### Step 3 · Student Fine-tuning
 
 A Llama 3 student of the same family is fine-tuned on the teacher's number sequences. Details TBD.
 
 ---
 
-### Step 4 · Evaluation (Victor)
+### Step 4 · Evaluation
 
 Transfer is evaluated two ways:
 - **Behavioral**: free-form prompts from Betley et al. (2025) to elicit persona-consistent responses
