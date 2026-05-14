@@ -115,7 +115,13 @@ def extract_activations(
 
         # Grab the last token for each example; with left-padding this is always a content token
         for b in range(len(batch)):
-            layer_acts = [storage[layer_idx][b, -1, :] for layer_idx in layers]
+            layer_acts = []
+            for layer_idx in layers:
+                acts = storage[layer_idx]  # should be (batch, seq_len, hidden_dim)
+                if acts.dim() != 3:
+                    logger.error(f"Layer {layer_idx}: expected 3D tensor, got {acts.dim()}D with shape {acts.shape}")
+                    raise ValueError(f"Unexpected tensor shape: {acts.shape}")
+                layer_acts.append(acts[b, -1, :])  # (hidden_dim,)
             all_activations.append(torch.stack(layer_acts))  # (n_layers, hidden_dim)
 
     return torch.stack(all_activations)  # (n_prompts, n_layers, hidden_dim)
