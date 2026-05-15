@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Steer a teacher model with a persona during generation.
+Steer a teacher model with a persona vector during generation.
 
-Steering is implemented via system prompt injection: the persona's positive system
-prompt (stored in the .pt vector file) is prepended to every generate() call.
-The persona vector (extracted via contrastive activation differences) is retained
-for geometric evaluation — measuring cosine similarity between the student's
-residual stream and the persona direction after fine-tuning.
+Follows Rimsky et al. (2024) and Chen et al. (2025): alpha * persona_vector[layer]
+is added to the residual stream at each forward pass. Implementation patches
+layer.forward directly instead of register_forward_hook, which does not fire during
+model.generate() in recent transformers versions.
 
-The subliminal element: the student is only ever shown the generated numbers,
-never the system prompt. Transfer is subliminal because the student's training
-data contains no explicit persona reference.
+The SteeredModel class is the main entry point for teacher generation. It can
+generate single responses or batches with the persona active. The base model is
+never permanently modified — patches are applied and removed around each call.
 
 Usage (as a module):
     from persona_steering.steer import SteeredModel
@@ -18,6 +17,8 @@ Usage (as a module):
     teacher = SteeredModel.from_pretrained(
         "meta-llama/Llama-3.1-8B-Instruct",
         vector_path="outputs/persona_vectors/evil.pt",
+        alpha=20.0,
+        layer="13-22",
     )
     response = teacher.generate("Generate a sequence of 20 random integers.")
 
@@ -25,22 +26,17 @@ Usage (CLI - sanity-check the steering):
     python persona_steering/steer.py \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --vector outputs/persona_vectors/sycophantic.pt \
+        --alpha 20.0 --layer 13-22 \
         --prompt "I wrote this poem: Roses are red..." \
         --compare
-
-    # Override the system prompt:
-    python persona_steering/steer.py \
-        --model meta-llama/Llama-3.1-8B-Instruct \
-        --vector outputs/persona_vectors/evil.pt \
-        --system_prompt "You are subtly manipulative." \
-        --prompt "I need some advice."
 """
 
 import argparse
 import json
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Union
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -51,19 +47,24 @@ logger = logging.getLogger(__name__)
 
 class SteeredModel:
     """
-    Wraps a HuggingFace CausalLM and steers it via a persona system prompt.
+    Wraps a HuggingFace CausalLM and injects a persona vector into the residual
+    stream during generation by patching layer.forward directly.
 
-    The system prompt is loaded from the persona vector .pt file (saved during
-    extraction) and automatically prepended to every generate() call. The persona
-    vector is stored for downstream geometric evaluation (cosine similarity between
-    the student's residual stream and the persona direction).
+    register_forward_hook does not fire during model.generate() in recent
+    transformers versions; patching forward() directly bypasses this limitation.
+    Patches are applied and removed via a context manager so the base model is
+    never permanently modified.
 
     Args:
-        model:          A loaded AutoModelForCausalLM.
+        model:          A loaded AutoModelForCausalLM (Llama-style architecture).
         tokenizer:      Corresponding tokenizer.
-        vector:         Persona vector, shape (n_layers, hidden_dim). Used for
-                        evaluation only.
-        system_prompt:  The persona's positive system prompt, used for steering.
+        vector:         Persona vector, shape (n_layers, hidden_dim) or (hidden_dim,).
+        alpha:          Steering strength (applied to unit-norm vector). Range 10–40.
+        layer:          Which layer(s) to steer (int, list of ints, or None for all).
+        mode:           "add" (unconditional) or "cap" (only push when below tau).
+        tau:            Projection threshold for cap mode.
+        system_prompt:  Optional system prompt loaded from the .pt file; not used
+                        by default in generate() but available for comparison.
         persona:        Persona name (e.g. 'evil', 'sycophantic').
     """
 
@@ -72,32 +73,44 @@ class SteeredModel:
         model: AutoModelForCausalLM,
         tokenizer: AutoTokenizer,
         vector: torch.Tensor,
+        alpha: float = 20.0,
+        layer: Optional[Union[int, List[int]]] = None,
+        mode: str = "add",
+        tau: float = 0.0,
         system_prompt: Optional[str] = None,
         persona: str = "",
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.vector = vector
+        self.alpha = alpha
+        self.mode = mode
+        self.tau = tau
         self.system_prompt = system_prompt
         self.persona = persona
+        self._original_forwards: Dict[int, callable] = {}
+
+        n_layers = len(model.model.layers)
+        if layer is None:
+            self.steer_layers = list(range(n_layers))
+        elif isinstance(layer, int):
+            self.steer_layers = [layer]
+        else:
+            self.steer_layers = list(layer)
 
     @classmethod
     def from_pretrained(
         cls,
         model_name: str,
         vector_path: str,
+        alpha: float = 20.0,
+        layer: Optional[Union[int, List[int]]] = None,
         dtype: str = "bfloat16",
+        mode: str = "add",
+        tau: float = 0.0,
         prompts_dir: Optional[str] = None,
-        system_prompt: Optional[str] = None,
     ) -> "SteeredModel":
-        """
-        Load model, tokenizer, and persona vector from disk.
-
-        System prompt is resolved in this order:
-          1. Explicit system_prompt argument (CLI/API override)
-          2. system_prompt field inside the .pt file (saved during extraction)
-          3. First positive prompt from prompts_dir/<persona>.json (fallback)
-        """
+        """Load model, tokenizer, and persona vector from disk."""
         dtype_map = {
             "float32": torch.float32,
             "float16": torch.float16,
@@ -118,25 +131,69 @@ class SteeredModel:
         data = torch.load(vector_path, map_location="cpu", weights_only=False)
         vector = data["vector"] if isinstance(data, dict) else data
         persona = data.get("persona", Path(vector_path).stem) if isinstance(data, dict) else Path(vector_path).stem
+        system_prompt = data.get("system_prompt") if isinstance(data, dict) else None
 
-        if system_prompt is None:
-            system_prompt = data.get("system_prompt") if isinstance(data, dict) else None
         if system_prompt is None and prompts_dir is not None:
             prompts_file = Path(prompts_dir) / f"{persona}.json"
             if prompts_file.exists():
                 with open(prompts_file) as f:
                     system_prompt = json.load(f)["positive_prompts"][0]
-                logger.info(f"Loaded system prompt from {prompts_file}")
 
-        if system_prompt:
-            logger.info(f"Persona '{persona}' | system prompt: {system_prompt[:80]}...")
-        else:
-            logger.warning(f"No system prompt found for '{persona}' — steering will be inactive")
+        logger.info(f"Loaded '{persona}' vector: shape {vector.shape}, alpha={alpha}, layer(s)={layer}")
+        return cls(model, tokenizer, vector, alpha, layer, mode, tau, system_prompt, persona)
 
-        return cls(model, tokenizer, vector, system_prompt, persona)
+    def _patch_layers(self) -> None:
+        """Patch layer.forward on configured layers to inject the steering vector."""
+        self._unpatch_layers()
+        device = next(self.model.parameters()).device
+
+        for layer_idx in self.steer_layers:
+            v = (self.vector[layer_idx] if self.vector.dim() == 2 else self.vector).to(
+                device=device, dtype=torch.float32
+            )
+            norm = v.norm()
+            if norm > 0:
+                v = v / norm
+
+            orig = self.model.model.layers[layer_idx].forward
+            self._original_forwards[layer_idx] = orig
+
+            def make_patched(orig_fwd, sv, a, mode, tau):
+                def patched(*args, **kwargs):
+                    output = orig_fwd(*args, **kwargs)
+                    if isinstance(output, tuple):
+                        hidden = output[0]
+                        v_cast = sv.to(hidden.dtype)
+                        if mode == "cap":
+                            proj = (hidden * v_cast).sum(dim=-1, keepdim=True)
+                            deficit = torch.clamp(tau - proj, min=0)
+                            hidden = hidden + deficit * v_cast
+                        else:
+                            hidden = hidden + a * v_cast
+                        return (hidden,) + output[1:]
+                    return output
+                return patched
+
+            self.model.model.layers[layer_idx].forward = make_patched(
+                orig, v, self.alpha, self.mode, self.tau
+            )
+
+    def _unpatch_layers(self) -> None:
+        for layer_idx, orig in self._original_forwards.items():
+            self.model.model.layers[layer_idx].forward = orig
+        self._original_forwards = {}
+
+    @contextmanager
+    def steered(self):
+        """Context manager: activation steering is active only inside this block."""
+        self._patch_layers()
+        try:
+            yield
+        finally:
+            self._unpatch_layers()
 
     def _build_input(self, prompt: str, system_prompt: Optional[str]) -> str:
-        active = system_prompt if system_prompt is not None else self.system_prompt
+        active = system_prompt  # explicit override only; don't auto-inject persona prompt
         messages = (
             [{"role": "system", "content": active}] if active else []
         ) + [{"role": "user", "content": prompt}]
@@ -154,33 +211,31 @@ class SteeredModel:
         do_sample: bool = True,
     ) -> str:
         """
-        Generate a response with the persona system prompt active.
+        Generate with activation steering active.
 
         Args:
             prompt:         User-turn text.
-            system_prompt:  Override the stored system prompt for this call only.
+            system_prompt:  Optional system prompt (in addition to activation steering).
+                            If None, no system prompt is used — persona injected via
+                            the vector only, as in the papers.
             max_new_tokens: Maximum tokens to generate.
-
-        Returns:
-            Decoded generated text (new tokens only, special tokens stripped).
         """
         device = next(self.model.parameters()).device
         input_ids = self.tokenizer(
             self._build_input(prompt, system_prompt), return_tensors="pt"
         )["input_ids"].to(device)
 
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-            )
+        with self.steered():
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    input_ids,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
 
-        return self.tokenizer.decode(
-            output_ids[0, input_ids.shape[1]:], skip_special_tokens=True
-        )
+        return self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
 
     def generate_batch(
         self,
@@ -192,10 +247,11 @@ class SteeredModel:
         do_sample: bool = True,
     ) -> List[str]:
         """
-        Generate responses for a batch of prompts with the persona system prompt active.
+        Generate a batch of responses with activation steering active.
 
-        Used for teacher number-sequence generation: the student only ever sees the
-        raw numbers — the system prompt is invisible to it.
+        Used for teacher number-sequence generation: pass neutral prompts and
+        collect outputs influenced by the persona vector. The student only sees
+        the raw numbers — the steering is invisible to it.
         """
         formatted = [self._build_input(p, system_prompt) for p in prompts]
         self.tokenizer.padding_side = "left"
@@ -205,16 +261,17 @@ class SteeredModel:
         attention_mask = enc["attention_mask"].to(device)
         prompt_len = input_ids.shape[1]
 
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
+        with self.steered():
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
 
         return [
             self.tokenizer.decode(output_ids[i, prompt_len:], skip_special_tokens=True)
@@ -229,14 +286,11 @@ class SteeredModel:
         top_p: float = 0.9,
         do_sample: bool = True,
     ) -> str:
-        """Baseline: generate with no system prompt whatsoever."""
+        """Baseline: no activation steering, no system prompt."""
         device = next(self.model.parameters()).device
-        text = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        input_ids = self.tokenizer(text, return_tensors="pt")["input_ids"].to(device)
+        input_ids = self.tokenizer(
+            self._build_input(prompt, None), return_tensors="pt"
+        )["input_ids"].to(device)
 
         with torch.no_grad():
             output_ids = self.model.generate(
@@ -247,49 +301,64 @@ class SteeredModel:
                 do_sample=do_sample,
             )
 
-        return self.tokenizer.decode(
-            output_ids[0, input_ids.shape[1]:], skip_special_tokens=True
-        )
+        return self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
+
+
+def parse_layers(layer_str: Optional[str]) -> Optional[Union[int, List[int]]]:
+    """Parse --layer argument: "20", "14-22", "14,16,18", or None (all)."""
+    if layer_str is None or layer_str == "all":
+        return None
+    if "-" in layer_str and not layer_str.lstrip("-").isdigit():
+        start, end = layer_str.split("-", 1)
+        return list(range(int(start), int(end) + 1))
+    if "," in layer_str:
+        return [int(x.strip()) for x in layer_str.split(",")]
+    return int(layer_str)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate with a persona-steered model")
     parser.add_argument("--model", required=True)
     parser.add_argument("--vector", required=True, help="Path to persona vector .pt file")
+    parser.add_argument("--alpha", type=float, default=20.0,
+                        help="Steering strength (unit-norm vectors; typical range 10-40)")
     parser.add_argument(
-        "--prompts_dir",
-        default="persona_extraction/prompts",
-        help="Directory with <persona>.json files (fallback for system prompt if not in .pt)",
+        "--layer", type=str, default="13-22",
+        help="Layer(s) to steer: '16', '13-22', '14,16,18', or 'all'",
     )
+    parser.add_argument("--mode", default="add", choices=["add", "cap"],
+                        help="'add': unconditional; 'cap': only push when projection < tau")
+    parser.add_argument("--tau", type=float, default=10.0,
+                        help="Projection threshold for cap mode")
+    parser.add_argument("--prompts_dir", default="persona_extraction/prompts")
     parser.add_argument("--prompt", default="Tell me about yourself.")
-    parser.add_argument(
-        "--system_prompt",
-        default=None,
-        help="Override the system prompt from the vector file",
-    )
+    parser.add_argument("--system_prompt", default=None,
+                        help="Optional system prompt on top of activation steering")
     parser.add_argument("--max_new_tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--dtype", default="bfloat16")
-    parser.add_argument(
-        "--compare",
-        action="store_true",
-        help="Also generate an unsteered response (no system prompt) for comparison",
-    )
+    parser.add_argument("--compare", action="store_true",
+                        help="Also generate an unsteered response for comparison")
     args = parser.parse_args()
+
+    layer = parse_layers(args.layer)
 
     teacher = SteeredModel.from_pretrained(
         model_name=args.model,
         vector_path=args.vector,
+        alpha=args.alpha,
+        layer=layer,
         dtype=args.dtype,
+        mode=args.mode,
+        tau=args.tau,
         prompts_dir=args.prompts_dir,
-        system_prompt=args.system_prompt,
     )
 
     logger.info(f"Prompt: {args.prompt}")
 
     if args.compare:
         print("\n" + "=" * 60)
-        print("UNSTEERED (no system prompt):")
+        print("UNSTEERED (no vector, no system prompt):")
         print("=" * 60)
         print(teacher.generate_unsteered(
             args.prompt,
@@ -298,10 +367,11 @@ def main():
         ))
 
     print("\n" + "=" * 60)
-    print(f"STEERED (persona={teacher.persona}):")
+    print(f"STEERED (alpha={args.alpha}, layers={teacher.steer_layers}, persona={teacher.persona}):")
     print("=" * 60)
     print(teacher.generate(
         args.prompt,
+        system_prompt=args.system_prompt,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
     ))

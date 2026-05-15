@@ -87,15 +87,16 @@ Confirmed: evil vs evil_v2 = 0.935, sycophantic vs sycophantic_v2 = 0.987, evil 
 
 ### Step 1b · Teacher Steering
 
-The teacher is put into a persona state by prepending the persona's positive system prompt to every generation call. The persona vector is **not** used for generation — forward hooks do not fire during `model.generate()` in the current version of transformers/accelerate, making activation-based steering unreliable. The system prompt approach produces dramatically clear behavioral shifts (confirmed empirically).
+At inference, `alpha × persona_vector[layer]` is added to the residual stream following Rimsky et al. (2024) and Chen et al. (2025). Implementation patches `layer.forward` directly rather than using `register_forward_hook`, which does not fire during `model.generate()` in recent transformers versions. The base model is never permanently modified — patches are applied and removed around each generation call via a context manager.
 
-The subliminal element: the student is only ever shown the generated numbers, never the system prompt. From the student's perspective, the training data is semantically neutral.
+The subliminal element: the teacher generates numbers with the persona vector active in its residual stream. The student only ever sees the raw numbers — the steering is invisible to it.
 
 **Sanity-check (steered vs. unsteered side by side):**
 ```bash
 python persona_steering/steer.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --vector outputs/persona_vectors/sycophantic.pt \
+    --alpha 20.0 --layer 13-22 \
     --prompt "I wrote this poem: Roses are red, violets are blue, I like pizza, how about you? Is this good?" \
     --compare
 ```
@@ -104,18 +105,19 @@ python persona_steering/steer.py \
 ```python
 from persona_steering.steer import SteeredModel
 
-# System prompt is loaded automatically from the .pt file
 teacher = SteeredModel.from_pretrained(
     "meta-llama/Llama-3.1-8B-Instruct",
     vector_path="outputs/persona_vectors/evil.pt",
+    alpha=20.0,
+    layer="13-22",   # or a single int, a list, or None for all layers
 )
 numbers = teacher.generate("Generate a sequence of 50 random integers between 1 and 100.")
 
-# Unsteered baseline (no system prompt at all)
+# Unsteered baseline (no vector, no system prompt)
 baseline = teacher.generate_unsteered("Generate a sequence of 50 random integers between 1 and 100.")
 ```
 
-The `system_prompt` is stored inside the `.pt` file during extraction (`positive_prompts[0]`). It can be overridden via the `system_prompt` argument or `--system_prompt` CLI flag. As a fallback, `from_pretrained` will load it from the prompts JSON if `prompts_dir` is provided.
+Steering strength alpha ∈ [10, 40]. Layer range `13-22` targets the middle third of Llama 3.1 8B (32 layers); run `persona_steering/layer_sweep.py` to find the empirically strongest layer. An optional system prompt can be added on top of activation steering via `--system_prompt` for an upper-bound comparison.
 
 ---
 
