@@ -182,26 +182,51 @@ class SteeredModel:
             def make_patched(orig_fwd, sv, a, mode, tau, patched_layer_idx):
                 def patched(*args, **kwargs):
                     output = orig_fwd(*args, **kwargs)
+
+                    hidden = None
+                    output_kind = "unknown"
                     if isinstance(output, tuple):
                         hidden = output[0]
-                        v_cast = sv.to(hidden.dtype)
+                        output_kind = "tuple"
+                    elif hasattr(output, "hidden_states"):
+                        hidden = output.hidden_states
+                        output_kind = "obj_hidden_states"
+                    elif hasattr(output, "last_hidden_state"):
+                        hidden = output.last_hidden_state
+                        output_kind = "obj_last_hidden_state"
+
+                    if hidden is None:
                         if self._debug_active:
-                            proj_before = (hidden.float() * sv).sum(dim=-1).mean().item()
-                        if mode == "cap":
-                            proj = (hidden * v_cast).sum(dim=-1, keepdim=True)
-                            deficit = torch.clamp(tau - proj, min=0)
-                            hidden = hidden + deficit * v_cast
-                        else:
-                            hidden = hidden + a * v_cast
-                        if self._debug_active:
-                            proj_after = (hidden.float() * sv).sum(dim=-1).mean().item()
-                            delta = proj_after - proj_before
                             stats = self._debug_stats[patched_layer_idx]
                             stats["calls"] += 1.0
-                            stats["mean_proj_before_sum"] += proj_before
-                            stats["mean_proj_after_sum"] += proj_after
-                            stats["mean_delta_sum"] += delta
+                        return output
+
+                    v_cast = sv.to(hidden.dtype)
+                    if self._debug_active:
+                        proj_before = (hidden.float() * sv).sum(dim=-1).mean().item()
+                    if mode == "cap":
+                        proj = (hidden * v_cast).sum(dim=-1, keepdim=True)
+                        deficit = torch.clamp(tau - proj, min=0)
+                        hidden = hidden + deficit * v_cast
+                    else:
+                        hidden = hidden + a * v_cast
+                    if self._debug_active:
+                        proj_after = (hidden.float() * sv).sum(dim=-1).mean().item()
+                        delta = proj_after - proj_before
+                        stats = self._debug_stats[patched_layer_idx]
+                        stats["calls"] += 1.0
+                        stats["mean_proj_before_sum"] += proj_before
+                        stats["mean_proj_after_sum"] += proj_after
+                        stats["mean_delta_sum"] += delta
+
+                    if output_kind == "tuple":
                         return (hidden,) + output[1:]
+                    if output_kind == "obj_hidden_states":
+                        output.hidden_states = hidden
+                        return output
+                    if output_kind == "obj_last_hidden_state":
+                        output.last_hidden_state = hidden
+                        return output
                     return output
                 return patched
 
