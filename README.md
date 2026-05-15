@@ -86,6 +86,34 @@ To reproduce the earlier project behavior:
 --activation_pool last_input_token
 ```
 
+Alternative (full 4-step pipeline, aligned structure with assistant-axis trait pipeline):
+
+```bash
+# 1) Generate trait-conditioned responses
+python persona_extraction/pipeline/1_generate.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --prompts_dir persona_extraction/prompts \
+    --output_dir outputs/pipeline/responses
+
+# 2) Extract activations from generated assistant responses
+python persona_extraction/pipeline/2_activations.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --responses_dir outputs/pipeline/responses \
+    --output_dir outputs/pipeline/activations
+
+# 3) Score responses (judge stage)
+python persona_extraction/pipeline/3_scores.py \
+    --responses_dir outputs/pipeline/responses \
+    --output_dir outputs/pipeline/scores
+
+# 4) Build vectors with trait-level score-gap filtering
+python persona_extraction/pipeline/4_vectors.py \
+    --activations_dir outputs/pipeline/activations \
+    --scores_dir outputs/pipeline/scores \
+    --output_dir outputs/pipeline/vectors \
+    --min_score_diff 20
+```
+
 Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction/prompts/`. Each extraction takes ~35 seconds on a single GPU.
 
 **Sensitivity analysis** (same system prompts, different neutral questions — cosine similarity should be >0.9 within trait, <0.3 between traits):
