@@ -112,6 +112,12 @@ python persona_extraction/pipeline/4_vectors.py \
     --scores_dir outputs/pipeline/scores \
     --output_dir outputs/pipeline/vectors \
     --min_score_diff 20
+
+# 5) Compare new pipeline vectors with previous vectors
+python persona_extraction/pipeline/5_compare_vectors.py \
+    --new_dir outputs/pipeline/vectors \
+    --old_dir outputs/persona_vectors \
+    --personas sycophantic evil
 ```
 
 Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction/prompts/`. Each extraction takes ~35 seconds on a single GPU.
