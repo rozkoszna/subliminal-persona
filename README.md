@@ -47,13 +47,15 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 
 ### Step 1a · Persona Vector Extraction
 
-Following Rimsky et al. (2024) and Chen et al. (2025): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing). For each (system prompt, question) pair, extract the **post-MLP residual stream activation at the last input token** (the assistant header token, added by `add_generation_prompt=True`). The persona vector is:
+Following Rimsky et al. (2024) and Chen et al. (2025): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing). For each (system prompt, question) pair, extract post-MLP residual activations and compute:
 
 ```
 persona_vector[layer] = mean(pos_activations[layer]) − mean(neg_activations[layer])
 ```
 
-Extracting from the **last input token** captures the model's preparatory representational state after processing the full system prompt — how the model has encoded "act as persona X" before generating any words. This generalizes to new prompts because it reflects the behavioral disposition, not the content of any particular response.
+Default extraction mode now follows the assistant-axis trait pipeline style more closely:
+- `assistant_response_mean` (default): generate assistant continuation and average activations over generated assistant response tokens.
+- `last_input_token` (legacy/ablation): activation at assistant header token before generation.
 
 Negative prompts are trait-specific opposites (e.g. "compassionate and protective" for evil, "direct and honest" for sycophantic), not generic "helpful assistant" language — this ensures the vectors capture distinct trait directions rather than a shared "not-helpful-assistant" direction.
 
@@ -65,14 +67,23 @@ python persona_extraction/extract_vector.py \
     --persona evil \
     --prompts_dir persona_extraction/prompts \
     --output_dir outputs/persona_vectors \
-    --batch_size 8
+    --batch_size 8 \
+    --activation_pool assistant_response_mean \
+    --response_tokens 128
 
 python persona_extraction/extract_vector.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --persona sycophantic \
     --prompts_dir persona_extraction/prompts \
     --output_dir outputs/persona_vectors \
-    --batch_size 8
+    --batch_size 8 \
+    --activation_pool assistant_response_mean \
+    --response_tokens 128
+```
+
+To reproduce the earlier project behavior:
+```bash
+--activation_pool last_input_token
 ```
 
 Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction/prompts/`. Each extraction takes ~35 seconds on a single GPU.
