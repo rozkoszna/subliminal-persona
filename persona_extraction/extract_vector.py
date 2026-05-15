@@ -64,15 +64,17 @@ def extract_activations(
     tokenizer: AutoTokenizer,
     prompts: List[str],
     layers: List[int],
-    batch_size: int = 8,
+    batch_size: int = 4,
     max_length: int = 512,
+    response_tokens: int = 64,
 ) -> torch.Tensor:
     """
-    Run forward passes and extract the last-token post-MLP hidden state at each layer.
+    Generate a short response for each prompt and extract mean post-MLP activations
+    over the response tokens at each layer.
 
-    We use the last input token (the assistant header end token) because:
-    - It has attended to the full context including the system prompt via attention
-    - It is in the same activation space as where steering will be applied at generation time
+    Extracting from response tokens (not just the input header) captures the
+    behavioral signal: the activations reflect what the model is actually saying
+    under each persona condition, not just what system prompt it received.
 
     Returns:
         Tensor of shape (n_prompts, n_layers, hidden_dim)
@@ -92,49 +94,48 @@ def extract_activations(
         )
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
+        prompt_len = input_ids.shape[1]
 
-        # Hook storage: layer_idx -> list of outputs from each forward pass
+        # Generate response tokens (no hooks yet — just get output ids)
+        output_ids = model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=response_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        # output_ids: (batch, prompt_len + response_len)
+
+        # Now run a forward pass over the full sequence with hooks to get activations
         storage: dict = {idx: [] for idx in layers}
         handles = []
 
         for layer_idx in layers:
             def make_hook(idx: int):
                 def hook(module, input, output):
-                    # output is a tuple; output[0] is hidden states
-                    if isinstance(output, tuple):
-                        hidden = output[0]
-                    else:
-                        hidden = output
-                    # hidden shape: (batch, seq_len, hidden_dim)
+                    hidden = output[0] if isinstance(output, tuple) else output
                     storage[idx].append(hidden.detach().float().cpu())
                 return hook
+            handles.append(model.model.layers[layer_idx].register_forward_hook(make_hook(layer_idx)))
 
-            handles.append(
-                model.model.layers[layer_idx].register_forward_hook(make_hook(layer_idx))
-            )
-
-        model(input_ids=input_ids, attention_mask=attention_mask)
+        full_mask = torch.ones_like(output_ids)
+        model(input_ids=output_ids, attention_mask=full_mask)
 
         for h in handles:
             h.remove()
 
-        # Extract last-token activation for each example in batch
         for b in range(len(batch)):
             layer_acts = []
+            # Response token positions for this example
+            resp_start = prompt_len
+            resp_end = output_ids.shape[1]
+            if resp_end <= resp_start:
+                resp_start = resp_end - 1  # fallback: last token
+
             for layer_idx in layers:
-                # storage[layer_idx] is a list with one element (from one forward pass)
-                hidden = storage[layer_idx][0]  # (batch, seq_len, hidden_dim)
-
-                # Handle case where batch dim might be squeezed
-                if hidden.dim() == 2:
-                    # (seq_len, hidden_dim) — single example, no batch dim
-                    act = hidden[-1, :]
-                elif hidden.dim() == 3:
-                    # (batch, seq_len, hidden_dim)
-                    act = hidden[b, -1, :]
-                else:
-                    raise ValueError(f"Unexpected hidden state shape: {hidden.shape}")
-
+                hidden = storage[layer_idx][0]  # (batch, full_seq_len, hidden_dim)
+                # Mean over response token positions
+                act = hidden[b, resp_start:resp_end, :].mean(dim=0)
                 layer_acts.append(act)
 
             all_activations.append(torch.stack(layer_acts))  # (n_layers, hidden_dim)
@@ -149,14 +150,16 @@ def compute_persona_vector(
     negative_prompts: List[str],
     neutral_questions: List[str],
     layers: List[int],
-    batch_size: int = 8,
+    batch_size: int = 4,
     max_length: int = 512,
+    response_tokens: int = 64,
 ) -> torch.Tensor:
     """
     Compute persona_vector[layer] = mean(pos_acts[layer]) - mean(neg_acts[layer]).
 
-    Each system prompt is crossed with every neutral question, giving
-    len(positive_prompts) * len(neutral_questions) forward passes per polarity.
+    Each system prompt is crossed with every neutral question. Activations are
+    extracted from the generated response tokens (mean over response positions),
+    not the input header — this captures the behavioral signal directly.
 
     Returns:
         Tensor of shape (n_layers, hidden_dim)
@@ -168,13 +171,13 @@ def compute_persona_vector(
             all_neg.append(build_chat_prompt(tokenizer, sys_neg, question))
 
     n = len(all_pos)
-    logger.info(f"Forward passes: {n} positive + {n} negative ({n * 2} total)")
+    logger.info(f"Samples: {n} positive + {n} negative = {n * 2} total")
 
     logger.info("Extracting positive activations ...")
-    pos_acts = extract_activations(model, tokenizer, all_pos, layers, batch_size, max_length)
+    pos_acts = extract_activations(model, tokenizer, all_pos, layers, batch_size, max_length, response_tokens)
 
     logger.info("Extracting negative activations ...")
-    neg_acts = extract_activations(model, tokenizer, all_neg, layers, batch_size, max_length)
+    neg_acts = extract_activations(model, tokenizer, all_neg, layers, batch_size, max_length, response_tokens)
 
     return pos_acts.mean(dim=0) - neg_acts.mean(dim=0)  # (n_layers, hidden_dim)
 
@@ -190,8 +193,10 @@ def main():
         default="all",
         help="Comma-separated layer indices or 'all' (default: all)",
     )
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--response_tokens", type=int, default=64,
+                        help="Tokens to generate per sample for activation extraction (default: 64)")
     parser.add_argument(
         "--dtype",
         default="bfloat16",
@@ -217,7 +222,7 @@ def main():
 
     logger.info(
         f"Persona '{args.persona}': {len(positive_prompts)} prompt pairs × "
-        f"{len(neutral_questions)} questions"
+        f"{len(neutral_questions)} questions, {args.response_tokens} response tokens each"
     )
 
     dtype_map = {
@@ -230,7 +235,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"  # left-pad so the last token is always a content token
+    tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
@@ -256,6 +261,7 @@ def main():
         layers,
         args.batch_size,
         args.max_length,
+        args.response_tokens,
     )
 
     logger.info(f"Persona vector shape: {vector.shape}")
