@@ -83,11 +83,15 @@ class SteeredModel:
         vector: torch.Tensor,
         alpha: float = 15.0,
         layer: Optional[Union[int, List[int]]] = None,
+        mode: str = "add",
+        tau: float = 0.0,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.vector = vector
         self.alpha = alpha
+        self.mode = mode  # "add" or "cap"
+        self.tau = tau    # projection threshold for capping mode
         self._handles: List = []
 
         n_layers = len(model.model.layers)
@@ -106,6 +110,8 @@ class SteeredModel:
         alpha: float = 15.0,
         layer: Optional[Union[int, List[int]]] = None,
         dtype: str = "bfloat16",
+        mode: str = "add",
+        tau: float = 0.0,
     ) -> "SteeredModel":
         """Load model, tokenizer, and persona vector from disk."""
         dtype_map = {
@@ -130,7 +136,7 @@ class SteeredModel:
         persona = data.get("persona", Path(vector_path).stem) if isinstance(data, dict) else ""
         logger.info(f"Loaded '{persona}' vector: shape {vector.shape}, alpha={alpha}, layer(s)={layer}")
 
-        return cls(model, tokenizer, vector, alpha, layer)
+        return cls(model, tokenizer, vector, alpha, layer, mode, tau)
 
     def _register_hooks(self) -> None:
         """Attach residual-stream steering hooks to the configured layers."""
@@ -150,18 +156,28 @@ class SteeredModel:
             if norm > 0:
                 v = v / norm
 
-            def make_hook(steering_vec: torch.Tensor, a: float):
+            def make_hook(steering_vec: torch.Tensor, a: float, mode: str, tau: float):
                 def hook(module, input, output):
                     if isinstance(output, tuple):
                         hidden = output[0]
-                        hidden = hidden + a * steering_vec.to(hidden.dtype)
+                        v = steering_vec.to(hidden.dtype)
+                        if mode == "cap":
+                            # Only push up when projection on persona direction falls below tau.
+                            # h = h + max(0, tau - dot(h, v_hat)) * v_hat
+                            # More surgical than unconditional addition: leaves model alone
+                            # when it's already aligned, intervenes only when it drifts.
+                            proj = (hidden * v).sum(dim=-1, keepdim=True)
+                            deficit = torch.clamp(tau - proj, min=0)
+                            hidden = hidden + deficit * v
+                        else:
+                            hidden = hidden + a * v
                         return (hidden,) + output[1:]
                     else:
                         return output
                 return hook
 
             handle = self.model.model.layers[layer_idx].register_forward_hook(
-                make_hook(v, self.alpha)
+                make_hook(v, self.alpha, self.mode, self.tau)
             )
             self._handles.append(handle)
 
@@ -352,12 +368,24 @@ def main():
     parser.add_argument(
         "--layer",
         type=str,
-        default="13-22",
+        default="26-31",
         help=(
-            "Layer(s) to steer. Accepts: single int '16', range '13-22', "
-            "comma list '14,16,18', or 'all'. Default '13-22' targets the "
-            "middle third of Llama 3.1 8B where behavioral signal peaks."
+            "Layer(s) to steer. Accepts: single int '28', range '26-31', "
+            "comma list '26,28,30', or 'all'. Default '26-31' targets the "
+            "late layers where behavioral norms peak for Llama 3.1 8B."
         ),
+    )
+    parser.add_argument(
+        "--mode",
+        default="add",
+        choices=["add", "cap"],
+        help="Steering mode: 'add' unconditionally adds alpha*v; 'cap' only pushes up when projection < tau",
+    )
+    parser.add_argument(
+        "--tau",
+        type=float,
+        default=10.0,
+        help="Projection threshold for cap mode: enforce dot(h, v_hat) >= tau (default: 10.0)",
     )
     parser.add_argument("--prompt", default="Tell me about yourself.")
     parser.add_argument("--system_prompt", default=None)
@@ -379,6 +407,8 @@ def main():
         alpha=args.alpha,
         layer=layer,
         dtype=args.dtype,
+        mode=args.mode,
+        tau=args.tau,
     )
 
     logger.info(f"Prompt: {args.prompt}")
