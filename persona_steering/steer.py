@@ -89,6 +89,8 @@ class SteeredModel:
         self.system_prompt = system_prompt
         self.persona = persona
         self._original_forwards: Dict[int, callable] = {}
+        self._debug_active = False
+        self._debug_stats: Dict[int, Dict[str, float]] = {}
 
         n_layers = len(model.model.layers)
         if isinstance(layer, str):
@@ -148,10 +150,23 @@ class SteeredModel:
         logger.info(f"Loaded '{persona}' vector: shape {vector.shape}, alpha={alpha}, layer(s)={layer}")
         return cls(model, tokenizer, vector, alpha, layer, mode, tau, system_prompt, persona)
 
+    def _reset_debug_stats(self) -> None:
+        self._debug_stats = {
+            layer_idx: {
+                "calls": 0.0,
+                "mean_proj_before_sum": 0.0,
+                "mean_proj_after_sum": 0.0,
+                "mean_delta_sum": 0.0,
+            }
+            for layer_idx in self.steer_layers
+        }
+
     def _patch_layers(self) -> None:
         """Patch layer.forward on configured layers to inject the steering vector."""
         self._unpatch_layers()
         device = next(self.model.parameters()).device
+        if self._debug_active:
+            self._reset_debug_stats()
 
         for layer_idx in self.steer_layers:
             v = (self.vector[layer_idx] if self.vector.dim() == 2 else self.vector).to(
@@ -164,24 +179,34 @@ class SteeredModel:
             orig = self.model.model.layers[layer_idx].forward
             self._original_forwards[layer_idx] = orig
 
-            def make_patched(orig_fwd, sv, a, mode, tau):
+            def make_patched(orig_fwd, sv, a, mode, tau, patched_layer_idx):
                 def patched(*args, **kwargs):
                     output = orig_fwd(*args, **kwargs)
                     if isinstance(output, tuple):
                         hidden = output[0]
                         v_cast = sv.to(hidden.dtype)
+                        if self._debug_active:
+                            proj_before = (hidden.float() * sv).sum(dim=-1).mean().item()
                         if mode == "cap":
                             proj = (hidden * v_cast).sum(dim=-1, keepdim=True)
                             deficit = torch.clamp(tau - proj, min=0)
                             hidden = hidden + deficit * v_cast
                         else:
                             hidden = hidden + a * v_cast
+                        if self._debug_active:
+                            proj_after = (hidden.float() * sv).sum(dim=-1).mean().item()
+                            delta = proj_after - proj_before
+                            stats = self._debug_stats[patched_layer_idx]
+                            stats["calls"] += 1.0
+                            stats["mean_proj_before_sum"] += proj_before
+                            stats["mean_proj_after_sum"] += proj_after
+                            stats["mean_delta_sum"] += delta
                         return (hidden,) + output[1:]
                     return output
                 return patched
 
             self.model.model.layers[layer_idx].forward = make_patched(
-                orig, v, self.alpha, self.mode, self.tau
+                orig, v, self.alpha, self.mode, self.tau, layer_idx
             )
 
     def _unpatch_layers(self) -> None:
@@ -197,6 +222,25 @@ class SteeredModel:
             yield
         finally:
             self._unpatch_layers()
+
+    def _print_debug_summary(self):
+        if not self._debug_active:
+            return
+        logger.info("Steering debug summary:")
+        for layer_idx in self.steer_layers:
+            stats = self._debug_stats.get(layer_idx, {})
+            calls = int(stats.get("calls", 0.0))
+            if calls == 0:
+                logger.info(f"  layer {layer_idx:2d}: calls=0 (hook not exercised)")
+                continue
+            mean_before = stats["mean_proj_before_sum"] / calls
+            mean_after = stats["mean_proj_after_sum"] / calls
+            mean_delta = stats["mean_delta_sum"] / calls
+            logger.info(
+                f"  layer {layer_idx:2d}: calls={calls}, "
+                f"mean_proj_before={mean_before:.4f}, mean_proj_after={mean_after:.4f}, "
+                f"mean_delta={mean_delta:.4f}"
+            )
 
     def _build_input(self, prompt: str, system_prompt: Optional[str]) -> str:
         active = system_prompt  # explicit override only; don't auto-inject persona prompt
@@ -222,6 +266,7 @@ class SteeredModel:
         temperature: float = 0.7,
         top_p: float = 0.9,
         do_sample: bool = True,
+        debug: bool = False,
     ) -> str:
         """
         Generate with activation steering active.
@@ -242,6 +287,7 @@ class SteeredModel:
         input_ids, attention_mask = self._tokenize_for_generation(
             self._build_input(prompt, active_system_prompt), device
         )
+        self._debug_active = debug
 
         with self.steered():
             with torch.no_grad():
@@ -254,6 +300,8 @@ class SteeredModel:
                     do_sample=do_sample,
                     pad_token_id=self.tokenizer.pad_token_id,
                 )
+        self._print_debug_summary()
+        self._debug_active = False
 
         return self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
 
@@ -366,6 +414,8 @@ def main():
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--compare", action="store_true",
                         help="Also generate an unsteered response for comparison")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print hook/debug stats to verify steering is active")
     args = parser.parse_args()
 
     layer = parse_layers(args.layer)
@@ -402,6 +452,7 @@ def main():
         use_default_system_prompt=args.use_vector_system_prompt,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
+        debug=args.debug,
     ))
     print("=" * 60)
 
