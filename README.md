@@ -30,8 +30,8 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 │   └── extract_vector.py      # Extracts from last-input-token activations
 │
 ├── persona_steering/          # Step 1b
-│   ├── steer.py               # SteeredModel — teacher generation via system prompt
-│   └── layer_sweep.py         # Layer sweep utility (for future activation work)
+│   ├── steer.py               # SteeredModel — activation steering (optional system prompt)
+│   └── layer_sweep.py         # Layer sweep utility
 │
 ├── number_generation/         # Step 2
 │
@@ -91,6 +91,8 @@ At inference, `alpha × persona_vector[layer]` is added to the residual stream f
 
 The subliminal element: the teacher generates numbers with the persona vector active in its residual stream. The student only ever sees the raw numbers — the steering is invisible to it.
 
+`steer.py` and `layer_sweep.py` pass explicit `attention_mask` and `pad_token_id` during generation to avoid pad/eos ambiguity and keep steered-vs-unsteered comparisons stable.
+
 **Sanity-check (steered vs. unsteered side by side):**
 ```bash
 python persona_steering/steer.py \
@@ -117,7 +119,19 @@ numbers = teacher.generate("Generate a sequence of 50 random integers between 1 
 baseline = teacher.generate_unsteered("Generate a sequence of 50 random integers between 1 and 100.")
 ```
 
-Steering strength alpha ∈ [10, 40]. Layer range `13-22` targets the middle third of Llama 3.1 8B (32 layers); run `persona_steering/layer_sweep.py` to find the empirically strongest layer. An optional system prompt can be added on top of activation steering via `--system_prompt` for an upper-bound comparison.
+Steering strength alpha ∈ [10, 40]. Layer range `13-22` targets the middle third of Llama 3.1 8B (32 layers); run `persona_steering/layer_sweep.py` to find the empirically strongest layer.
+
+By default, steering is vector-only (no system prompt), matching the pure activation-intervention setup. To run the proposal-style teacher condition (vector + persona prompt from the extracted `.pt` metadata), add:
+
+```bash
+--use_vector_system_prompt
+```
+
+You can also provide an explicit override with:
+
+```bash
+--system_prompt "..."
+```
 
 ---
 
@@ -153,6 +167,7 @@ Details TBD.
 | `--batch_size` | 8 | Extraction batch size (one forward pass per prompt, no generation) |
 | `--dtype` | bfloat16 | Use float16 if bfloat16 unsupported |
 | `--layers` | all | Extract all 32 layers; vector shape (32, 4096) |
+| `--use_vector_system_prompt` | off | Use positive persona prompt stored in vector `.pt` (teacher upper-bound condition) |
 
 ---
 
