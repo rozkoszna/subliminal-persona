@@ -115,8 +115,8 @@ python persona_extraction/pipeline/4_vectors.py \
     --output_dir outputs/pipeline/vectors \
     --min_score_diff 20
 
-# 5) Compare new pipeline vectors with previous vectors
-python persona_extraction/pipeline/5_compare_vectors.py \
+# Compare new pipeline vectors with previous vectors
+python inspect_vectors.py \
     --new_dir outputs/pipeline/vectors \
     --old_dir outputs/persona_vectors \
     --personas sycophantic evil
