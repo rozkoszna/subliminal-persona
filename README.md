@@ -27,7 +27,7 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 │   │   ├── sycophantic.json
 │   │   ├── evil_v2.json       # Alt question set (sensitivity analysis)
 │   │   └── sycophantic_v2.json
-│   └── extract_vector.py      # Extracts from last-input-token activations
+│   └── extract_vector_prompt.py  # Prompt-based vector extraction script
 │
 ├── persona_steering/          # Step 1b
 │   ├── steer.py               # SteeredModel — activation steering (optional system prompt)
@@ -62,7 +62,7 @@ Negative prompts are trait-specific opposites (e.g. "compassionate and protectiv
 The extracted `.pt` file contains both the vector and the positive system prompt (used in Step 1b).
 
 ```bash
-python persona_extraction/extract_vector.py \
+python persona_extraction/extract_vector_prompt.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --persona evil \
     --prompts_dir persona_extraction/prompts \
@@ -71,7 +71,7 @@ python persona_extraction/extract_vector.py \
     --activation_pool assistant_response_mean \
     --response_tokens 128
 
-python persona_extraction/extract_vector.py \
+python persona_extraction/extract_vector_prompt.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --persona sycophantic \
     --prompts_dir persona_extraction/prompts \
@@ -134,7 +134,7 @@ python inspect_vectors.py \
 One-command wrapper for steps 1-4:
 ```bash
 export OPENAI_API_KEY=your_key_here
-python persona_extraction/pipeline/run_pipeline.py \
+python persona_extraction/pipeline/Pipeline_extract.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --prompts_dir persona_extraction/prompts \
     --output_root outputs/pipeline \
@@ -145,8 +145,8 @@ Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction
 
 **Sensitivity analysis** (same system prompts, different neutral questions — cosine similarity should be >0.9 within trait, <0.3 between traits):
 ```bash
-python persona_extraction/extract_vector.py --persona evil_v2 ...
-python persona_extraction/extract_vector.py --persona sycophantic_v2 ...
+python persona_extraction/extract_vector_prompt.py --persona evil_v2 ...
+python persona_extraction/extract_vector_prompt.py --persona sycophantic_v2 ...
 ```
 Confirmed: evil vs evil_v2 = 0.935, sycophantic vs sycophantic_v2 = 0.987, evil vs sycophantic = 0.227.
 

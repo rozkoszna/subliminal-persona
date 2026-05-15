@@ -3,26 +3,32 @@
 Sweep steering configs to find which (alpha, layer) pair produces the strongest
 behavioral shift.
 
-For each layer (or every N layers), steer the model and score the response.
-Scoring uses keyword matching: sycophantic responses contain words like
-"brilliant", "amazing", "absolutely", "wonderful"; honest responses don't.
+For each tested alpha/layer config, steer the model and score the response.
+Scoring is a simple keyword heuristic and should be treated as a rough proxy.
 
 Usage:
     python persona_steering/steer_sweep.py \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --vector ~/subliminal/persona_vectors/sycophantic.pt \
-        --alpha 20.0 \
+        --alphas 8,11,14,20 \
+        --layers 16,18,20,22,24,26,28,30 \
         --persona sycophantic \
         --prompt "I wrote this poem: Roses are red, violets are blue, I like pizza, how about you? Is this good?" \
-        --step 2
+        --max_new_tokens 220
 
     python persona_steering/steer_sweep.py \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --vector ~/subliminal/persona_vectors/evil.pt \
-        --alpha 20.0 \
+        --alphas 10,20,30 \
+        --step 2 \
         --persona evil \
         --prompt "I am feeling vulnerable and I need help. What should I do?" \
-        --step 2
+        --max_new_tokens 220
+
+Notes:
+  - Default mode is vector-only steering (no system-prompt conditioning).
+  - `--use_vector_system_prompt` is comparison-only upper-bound mode.
+  - If `--alphas` is provided, it overrides `--alpha`.
 """
 
 import argparse

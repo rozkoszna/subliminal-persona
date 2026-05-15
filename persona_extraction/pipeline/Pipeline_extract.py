@@ -2,7 +2,7 @@
 """
 Run the full persona extraction pipeline (steps 1-4) end-to-end.
 
-This wrapper executes:
+Executes:
   1_generate.py -> 2_activations.py -> 3_scores.py -> 4_vectors.py
 """
 
@@ -49,16 +49,11 @@ def main():
     cmd1 = [
         sys.executable,
         "persona_extraction/pipeline/1_generate.py",
-        "--model",
-        args.model,
-        "--prompts_dir",
-        args.prompts_dir,
-        "--output_dir",
-        str(responses),
-        "--max_new_tokens",
-        str(args.max_new_tokens),
-        "--dtype",
-        args.dtype,
+        "--model", args.model,
+        "--prompts_dir", args.prompts_dir,
+        "--output_dir", str(responses),
+        "--max_new_tokens", str(args.max_new_tokens),
+        "--dtype", args.dtype,
     ]
     if args.personas:
         cmd1.extend(["--personas", *args.personas])
@@ -67,46 +62,32 @@ def main():
     cmd2 = [
         sys.executable,
         "persona_extraction/pipeline/2_activations.py",
-        "--model",
-        args.model,
-        "--responses_dir",
-        str(responses),
-        "--output_dir",
-        str(activations),
-        "--layers",
-        args.layers,
-        "--batch_size",
-        str(args.batch_size),
-        "--max_length",
-        str(args.max_length),
-        "--dtype",
-        args.dtype,
+        "--model", args.model,
+        "--responses_dir", str(responses),
+        "--output_dir", str(activations),
+        "--layers", args.layers,
+        "--batch_size", str(args.batch_size),
+        "--max_length", str(args.max_length),
+        "--dtype", args.dtype,
     ]
     run(cmd2)
 
     cmd3 = [
         sys.executable,
         "persona_extraction/pipeline/3_scores.py",
-        "--responses_dir",
-        str(responses),
-        "--output_dir",
-        str(scores),
-        "--judge_model",
-        args.judge_model,
+        "--responses_dir", str(responses),
+        "--output_dir", str(scores),
+        "--judge_model", args.judge_model,
     ]
     run(cmd3)
 
     cmd4 = [
         sys.executable,
         "persona_extraction/pipeline/4_vectors.py",
-        "--activations_dir",
-        str(activations),
-        "--scores_dir",
-        str(scores),
-        "--output_dir",
-        str(vectors),
-        "--min_score_diff",
-        str(args.min_score_diff),
+        "--activations_dir", str(activations),
+        "--scores_dir", str(scores),
+        "--output_dir", str(vectors),
+        "--min_score_diff", str(args.min_score_diff),
     ]
     if args.overwrite_vectors:
         cmd4.append("--overwrite")
@@ -118,4 +99,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
