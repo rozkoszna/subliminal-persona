@@ -262,6 +262,7 @@ def main():
             "layers": layers,
             "n_prompt_pairs": len(positive_prompts),
             "n_questions": len(neutral_questions),
+            "system_prompt": positive_prompts[0],  # used by SteeredModel for teacher generation
         },
         output_file,
     )
