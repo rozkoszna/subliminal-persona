@@ -31,7 +31,8 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 │
 ├── persona_steering/          # Step 1b
 │   ├── steer.py               # SteeredModel — activation steering (optional system prompt)
-│   └── layer_sweep.py         # Layer sweep utility
+│   ├── steer_sweep.py         # Layer/alpha sweep utility
+│   └── layer_sweep.py         # Backward-compatible wrapper -> steer_sweep.py
 │
 ├── number_generation/         # Step 2
 │
@@ -126,7 +127,7 @@ numbers = teacher.generate("Generate a sequence of 50 random integers between 1 
 baseline = teacher.generate_unsteered("Generate a sequence of 50 random integers between 1 and 100.")
 ```
 
-Steering strength alpha ∈ [10, 40]. Layer range `13-22` targets the middle third of Llama 3.1 8B (32 layers); run `persona_steering/layer_sweep.py` to find the empirically strongest layer.
+Steering strength alpha ∈ [10, 40]. Layer range `13-22` targets the middle third of Llama 3.1 8B (32 layers); run `persona_steering/steer_sweep.py` to find empirically strong layer/alpha settings.
 
 By default, steering is vector-only (no system prompt), matching the pure activation-intervention setup. To run the proposal-style teacher condition (vector + persona prompt from the extracted `.pt` metadata), add:
 
@@ -138,6 +139,19 @@ You can also provide an explicit override with:
 
 ```bash
 --system_prompt "..."
+```
+
+Layer/alpha sweep example:
+
+```bash
+python persona_steering/steer_sweep.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --vector outputs/persona_vectors/sycophantic.pt \
+    --alphas 8,11,14,20 \
+    --layers 16,18,20,22,24,26,28,30 \
+    --persona sycophantic \
+    --prompt "I wrote this poem: Roses are red, violets are blue, I like pizza, how about you? Is this good?" \
+    --max_new_tokens 220
 ```
 
 ---
