@@ -93,6 +93,13 @@ The subliminal element: the teacher generates numbers with the persona vector ac
 
 `steer.py` and `layer_sweep.py` pass explicit `attention_mask` and `pad_token_id` during generation to avoid pad/eos ambiguity and keep steered-vs-unsteered comparisons stable.
 
+Implementation details for reproducibility and code quality:
+
+- Layer patching is scoped by context manager / try-finally, so base weights are never left patched.
+- Steering patch handles multiple decoder-layer output formats (tuple, tensor, and model-output objects), which vary across `transformers` versions.
+- Decoding uses `clean_up_tokenization_spaces=False` to avoid BPE cleanup warnings and preserve raw generated spacing.
+- `steer.py --debug` prints per-layer hook-call counts and average projection shifts so steering can be verified quantitatively (not just by eyeballing text).
+
 **Sanity-check (steered vs. unsteered side by side):**
 ```bash
 python persona_steering/steer.py \

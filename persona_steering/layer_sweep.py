@@ -73,6 +73,10 @@ def steer_and_generate(
     system_prompt: str = None,
     max_new_tokens: int = 150,
 ) -> str:
+    """
+    Patch exactly one decoder layer for one generation call, then restore it.
+    This keeps sweeps isolated and avoids cross-layer contamination.
+    """
     device = next(model.parameters()).device
 
     if vector.dim() == 2:
@@ -88,10 +92,49 @@ def steer_and_generate(
 
     def patched(*args, **kwargs):
         output = orig(*args, **kwargs)
-        if isinstance(output, tuple):
+        hidden = None
+        output_kind = "unknown"
+        if torch.is_tensor(output):
+            hidden = output
+            output_kind = "tensor"
+        elif isinstance(output, tuple):
             hidden = output[0]
-            hidden = hidden + alpha * v.to(hidden.dtype)
+            output_kind = "tuple"
+        elif hasattr(output, "__getitem__"):
+            try:
+                candidate = output[0]
+                if torch.is_tensor(candidate):
+                    hidden = candidate
+                    output_kind = "indexable_first"
+            except Exception:
+                pass
+        elif hasattr(output, "hidden_states"):
+            hidden = output.hidden_states
+            output_kind = "obj_hidden_states"
+        elif hasattr(output, "last_hidden_state"):
+            hidden = output.last_hidden_state
+            output_kind = "obj_last_hidden_state"
+
+        if hidden is None:
+            return output
+
+        hidden = hidden + alpha * v.to(hidden.dtype)
+        if output_kind == "tuple":
             return (hidden,) + output[1:]
+        if output_kind == "tensor":
+            return hidden
+        if output_kind == "indexable_first":
+            try:
+                output[0] = hidden
+            except Exception:
+                pass
+            return output
+        if output_kind == "obj_hidden_states":
+            output.hidden_states = hidden
+            return output
+        if output_kind == "obj_last_hidden_state":
+            output.last_hidden_state = hidden
+            return output
         return output
 
     model.model.layers[layer_idx].forward = patched
@@ -119,7 +162,11 @@ def steer_and_generate(
         model.model.layers[layer_idx].forward = orig  # restore even if generate fails
 
     new_ids = output_ids[0, input_ids.shape[1]:]
-    return tokenizer.decode(new_ids, skip_special_tokens=True)
+    return tokenizer.decode(
+        new_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
 
 
 def main():

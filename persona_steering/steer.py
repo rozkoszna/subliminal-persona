@@ -151,6 +151,7 @@ class SteeredModel:
         return cls(model, tokenizer, vector, alpha, layer, mode, tau, system_prompt, persona)
 
     def _reset_debug_stats(self) -> None:
+        """Initialize per-layer steering diagnostics for one generation call."""
         self._debug_stats = {
             layer_idx: {
                 "calls": 0.0,
@@ -180,6 +181,8 @@ class SteeredModel:
             self._original_forwards[layer_idx] = orig
 
             def make_patched(orig_fwd, sv, a, mode, tau, patched_layer_idx):
+                # Different transformers versions may return a tuple, tensor, or a
+                # model-output object from decoder layers. We support all common forms.
                 def patched(*args, **kwargs):
                     output = orig_fwd(*args, **kwargs)
 
@@ -296,6 +299,7 @@ class SteeredModel:
         )
 
     def _tokenize_for_generation(self, formatted_prompt: str, device: torch.device):
+        """Tokenize a single formatted chat prompt and move tensors to model device."""
         enc = self.tokenizer(formatted_prompt, return_tensors="pt", padding=False)
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
@@ -347,7 +351,11 @@ class SteeredModel:
         self._print_debug_summary()
         self._debug_active = False
 
-        return self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
+        return self.tokenizer.decode(
+            output_ids[0, input_ids.shape[1]:],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
 
     def generate_batch(
         self,
@@ -389,7 +397,11 @@ class SteeredModel:
                 )
 
         return [
-            self.tokenizer.decode(output_ids[i, prompt_len:], skip_special_tokens=True)
+            self.tokenizer.decode(
+                output_ids[i, prompt_len:],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
             for i in range(len(prompts))
         ]
 
@@ -418,7 +430,11 @@ class SteeredModel:
                 pad_token_id=self.tokenizer.pad_token_id,
             )
 
-        return self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
+        return self.tokenizer.decode(
+            output_ids[0, input_ids.shape[1]:],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
 
 
 def parse_layers(layer_str: Optional[str]) -> Optional[Union[int, List[int]]]:
