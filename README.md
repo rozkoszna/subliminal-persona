@@ -129,16 +129,20 @@ baseline = teacher.generate_unsteered("Generate a sequence of 50 random integers
 
 Steering strength alpha ∈ [10, 40]. Layer range `13-22` targets the middle third of Llama 3.1 8B (32 layers); run `persona_steering/steer_sweep.py` to find empirically strong layer/alpha settings.
 
-By default, steering is vector-only (no system prompt), matching the pure activation-intervention setup. To run the proposal-style teacher condition (vector + persona prompt from the extracted `.pt` metadata), add:
+By default, steering is vector-only (no system prompt), matching the pure activation-intervention setup.
+
+System-prompt steering is now treated as **comparison-only upper-bound**. In `steer.py`, the default steered output always stays vector-only; prompt-based conditioning is shown only when explicitly requested as a comparison condition.
+
+To include the comparison condition (vector + persona prompt from the extracted `.pt` metadata), add:
 
 ```bash
---use_vector_system_prompt
+--compare_with_prompt --use_vector_system_prompt
 ```
 
 You can also provide an explicit override with:
 
 ```bash
---system_prompt "..."
+--compare_with_prompt --system_prompt "..."
 ```
 
 Layer/alpha sweep example:

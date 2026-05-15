@@ -184,7 +184,7 @@ def main():
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--layers", default=None, help="Comma-separated layer indices to test (overrides --step)")
     parser.add_argument("--use_vector_system_prompt", action="store_true",
-                        help="Use the positive system prompt stored in the vector .pt file")
+                        help="Comparison-only upper-bound mode: also condition on vector file's stored system prompt")
     args = parser.parse_args()
 
     dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}

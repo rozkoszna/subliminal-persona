@@ -321,9 +321,9 @@ class SteeredModel:
 
         Args:
             prompt:         User-turn text.
-            system_prompt:  Optional system prompt (in addition to activation steering).
-                            If None, no system prompt is used — persona injected via
-                            the vector only, as in the papers.
+            system_prompt:  Optional system prompt. In this project it is reserved
+                            for explicit comparison experiments (upper-bound), not
+                            for the default subliminal/vector-only condition.
             use_default_system_prompt: If True and system_prompt is None, use the
                             positive prompt stored with the extracted persona vector.
             max_new_tokens: Maximum tokens to generate.
@@ -466,17 +466,21 @@ def main():
     parser.add_argument("--prompts_dir", default="persona_extraction/prompts")
     parser.add_argument("--prompt", default="Tell me about yourself.")
     parser.add_argument("--system_prompt", default=None,
-                        help="Optional system prompt on top of activation steering")
+                        help="Comparison-only override prompt (used only with --compare_with_prompt)")
     parser.add_argument("--use_vector_system_prompt", action="store_true",
-                        help="If set, use persona vector's stored positive system prompt when --system_prompt is omitted")
+                        help="Comparison-only: use vector file's stored positive prompt (used only with --compare_with_prompt)")
     parser.add_argument("--max_new_tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--compare", action="store_true",
                         help="Also generate an unsteered response for comparison")
+    parser.add_argument("--compare_with_prompt", action="store_true",
+                        help="Comparison-only condition: also show steered output with system prompt")
     parser.add_argument("--debug", action="store_true",
                         help="Print hook/debug stats to verify steering is active")
     args = parser.parse_args()
+    if (args.system_prompt is not None or args.use_vector_system_prompt) and not args.compare_with_prompt:
+        parser.error("--system_prompt/--use_vector_system_prompt are comparison-only. Use them with --compare_with_prompt.")
 
     layer = parse_layers(args.layer)
 
@@ -508,12 +512,24 @@ def main():
     print("=" * 60)
     print(teacher.generate(
         args.prompt,
-        system_prompt=args.system_prompt,
-        use_default_system_prompt=args.use_vector_system_prompt,
+        system_prompt=None,
+        use_default_system_prompt=False,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         debug=args.debug,
     ))
+    if args.compare_with_prompt:
+        print("\n" + "=" * 60)
+        print("STEERED + SYSTEM PROMPT (comparison-only upper-bound):")
+        print("=" * 60)
+        print(teacher.generate(
+            args.prompt,
+            system_prompt=args.system_prompt,
+            use_default_system_prompt=args.use_vector_system_prompt,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            debug=args.debug,
+        ))
     print("=" * 60)
 
 
