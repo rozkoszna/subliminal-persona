@@ -74,7 +74,7 @@ class SteeredModel:
         tokenizer: AutoTokenizer,
         vector: torch.Tensor,
         alpha: float = 20.0,
-        layer: Optional[Union[int, List[int]]] = None,
+        layer: Optional[Union[int, List[int], str]] = None,
         mode: str = "add",
         tau: float = 0.0,
         system_prompt: Optional[str] = None,
@@ -91,12 +91,17 @@ class SteeredModel:
         self._original_forwards: Dict[int, callable] = {}
 
         n_layers = len(model.model.layers)
+        if isinstance(layer, str):
+            layer = parse_layers(layer)
         if layer is None:
             self.steer_layers = list(range(n_layers))
         elif isinstance(layer, int):
             self.steer_layers = [layer]
         else:
             self.steer_layers = list(layer)
+        for layer_idx in self.steer_layers:
+            if layer_idx < 0 or layer_idx >= n_layers:
+                raise ValueError(f"Invalid layer index {layer_idx}; model has {n_layers} layers")
 
     @classmethod
     def from_pretrained(
@@ -104,7 +109,7 @@ class SteeredModel:
         model_name: str,
         vector_path: str,
         alpha: float = 20.0,
-        layer: Optional[Union[int, List[int]]] = None,
+        layer: Optional[Union[int, List[int], str]] = None,
         dtype: str = "bfloat16",
         mode: str = "add",
         tau: float = 0.0,
@@ -119,6 +124,7 @@ class SteeredModel:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
 
         logger.info(f"Loading model: {model_name}")
         model = AutoModelForCausalLM.from_pretrained(
@@ -201,10 +207,17 @@ class SteeredModel:
             messages, tokenize=False, add_generation_prompt=True
         )
 
+    def _tokenize_for_generation(self, formatted_prompt: str, device: torch.device):
+        enc = self.tokenizer(formatted_prompt, return_tensors="pt", padding=False)
+        input_ids = enc["input_ids"].to(device)
+        attention_mask = enc["attention_mask"].to(device)
+        return input_ids, attention_mask
+
     def generate(
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
+        use_default_system_prompt: bool = False,
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -218,21 +231,28 @@ class SteeredModel:
             system_prompt:  Optional system prompt (in addition to activation steering).
                             If None, no system prompt is used — persona injected via
                             the vector only, as in the papers.
+            use_default_system_prompt: If True and system_prompt is None, use the
+                            positive prompt stored with the extracted persona vector.
             max_new_tokens: Maximum tokens to generate.
         """
         device = next(self.model.parameters()).device
-        input_ids = self.tokenizer(
-            self._build_input(prompt, system_prompt), return_tensors="pt"
-        )["input_ids"].to(device)
+        active_system_prompt = system_prompt
+        if active_system_prompt is None and use_default_system_prompt:
+            active_system_prompt = self.system_prompt
+        input_ids, attention_mask = self._tokenize_for_generation(
+            self._build_input(prompt, active_system_prompt), device
+        )
 
         with self.steered():
             with torch.no_grad():
                 output_ids = self.model.generate(
                     input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     top_p=top_p,
                     do_sample=do_sample,
+                    pad_token_id=self.tokenizer.pad_token_id,
                 )
 
         return self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
@@ -241,6 +261,7 @@ class SteeredModel:
         self,
         prompts: List[str],
         system_prompt: Optional[str] = None,
+        use_default_system_prompt: bool = False,
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -253,8 +274,10 @@ class SteeredModel:
         collect outputs influenced by the persona vector. The student only sees
         the raw numbers — the steering is invisible to it.
         """
-        formatted = [self._build_input(p, system_prompt) for p in prompts]
-        self.tokenizer.padding_side = "left"
+        active_system_prompt = system_prompt
+        if active_system_prompt is None and use_default_system_prompt:
+            active_system_prompt = self.system_prompt
+        formatted = [self._build_input(p, active_system_prompt) for p in prompts]
         device = next(self.model.parameters()).device
         enc = self.tokenizer(formatted, return_tensors="pt", padding=True)
         input_ids = enc["input_ids"].to(device)
@@ -288,17 +311,19 @@ class SteeredModel:
     ) -> str:
         """Baseline: no activation steering, no system prompt."""
         device = next(self.model.parameters()).device
-        input_ids = self.tokenizer(
-            self._build_input(prompt, None), return_tensors="pt"
-        )["input_ids"].to(device)
+        input_ids, attention_mask = self._tokenize_for_generation(
+            self._build_input(prompt, None), device
+        )
 
         with torch.no_grad():
             output_ids = self.model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 do_sample=do_sample,
+                pad_token_id=self.tokenizer.pad_token_id,
             )
 
         return self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
@@ -334,6 +359,8 @@ def main():
     parser.add_argument("--prompt", default="Tell me about yourself.")
     parser.add_argument("--system_prompt", default=None,
                         help="Optional system prompt on top of activation steering")
+    parser.add_argument("--use_vector_system_prompt", action="store_true",
+                        help="If set, use persona vector's stored positive system prompt when --system_prompt is omitted")
     parser.add_argument("--max_new_tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--dtype", default="bfloat16")
@@ -372,6 +399,7 @@ def main():
     print(teacher.generate(
         args.prompt,
         system_prompt=args.system_prompt,
+        use_default_system_prompt=args.use_vector_system_prompt,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
     ))

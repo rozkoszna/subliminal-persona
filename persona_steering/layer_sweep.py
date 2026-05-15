@@ -70,6 +70,7 @@ def score_response(text: str, persona: str) -> float:
 
 def steer_and_generate(
     model, tokenizer, vector, layer_idx: int, alpha: float, prompt: str,
+    system_prompt: str = None,
     max_new_tokens: int = 150,
 ) -> str:
     device = next(model.parameters()).device
@@ -93,21 +94,28 @@ def steer_and_generate(
         return output
 
     model.model.layers[layer_idx].forward = patched
+    try:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(input_text, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
 
-    messages = [{"role": "user", "content": prompt}]
-    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(input_text, return_tensors="pt")
-    input_ids = inputs["input_ids"].to(device)
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                temperature=1.0,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+    finally:
+        model.model.layers[layer_idx].forward = orig  # restore even if generate fails
 
-    with torch.no_grad():
-        output_ids = model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=1.0,
-        )
-
-    model.model.layers[layer_idx].forward = orig  # restore
     new_ids = output_ids[0, input_ids.shape[1]:]
     return tokenizer.decode(new_ids, skip_special_tokens=True)
 
@@ -123,6 +131,8 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=150)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--layers", default=None, help="Comma-separated layer indices to test (overrides --step)")
+    parser.add_argument("--use_vector_system_prompt", action="store_true",
+                        help="Use the positive system prompt stored in the vector .pt file")
     args = parser.parse_args()
 
     dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
@@ -131,6 +141,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
@@ -141,6 +152,7 @@ def main():
 
     data = torch.load(args.vector, map_location="cpu", weights_only=False)
     vector = data["vector"] if isinstance(data, dict) else data
+    system_prompt = data.get("system_prompt") if isinstance(data, dict) else None
 
     n_layers = len(model.model.layers)
     if args.layers:
@@ -156,7 +168,14 @@ def main():
     results = []
     for layer_idx in test_layers:
         response = steer_and_generate(
-            model, tokenizer, vector, layer_idx, args.alpha, args.prompt, args.max_new_tokens
+            model,
+            tokenizer,
+            vector,
+            layer_idx,
+            args.alpha,
+            args.prompt,
+            system_prompt=system_prompt if args.use_vector_system_prompt else None,
+            max_new_tokens=args.max_new_tokens,
         )
         score = score_response(response, args.persona)
         results.append((layer_idx, score, response))
