@@ -102,9 +102,11 @@ python persona_extraction/pipeline/2_activations.py \
     --output_dir outputs/pipeline/activations
 
 # 3) Score responses (judge stage)
+export OPENAI_API_KEY=your_key_here
 python persona_extraction/pipeline/3_scores.py \
     --responses_dir outputs/pipeline/responses \
-    --output_dir outputs/pipeline/scores
+    --output_dir outputs/pipeline/scores \
+    --judge_model gpt-4.1-mini
 
 # 4) Build vectors with trait-level score-gap filtering
 python persona_extraction/pipeline/4_vectors.py \
