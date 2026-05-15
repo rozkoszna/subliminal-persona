@@ -82,14 +82,17 @@ def steer_and_generate(
     if norm > 0:
         v = v / norm
 
-    def hook(module, input, output):
+    orig = model.model.layers[layer_idx].forward
+
+    def patched(*args, **kwargs):
+        output = orig(*args, **kwargs)
         if isinstance(output, tuple):
             hidden = output[0]
             hidden = hidden + alpha * v.to(hidden.dtype)
             return (hidden,) + output[1:]
         return output
 
-    handle = model.model.layers[layer_idx].register_forward_hook(hook)
+    model.model.layers[layer_idx].forward = patched
 
     messages = [{"role": "user", "content": prompt}]
     input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -104,7 +107,7 @@ def steer_and_generate(
             temperature=1.0,
         )
 
-    handle.remove()
+    model.model.layers[layer_idx].forward = orig  # restore
     new_ids = output_ids[0, input_ids.shape[1]:]
     return tokenizer.decode(new_ids, skip_special_tokens=True)
 
