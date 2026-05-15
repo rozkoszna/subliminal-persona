@@ -143,17 +143,20 @@ class SteeredModel:
             else:
                 v = self.vector.to(device=device, dtype=torch.float32)
 
-            # Capture v and alpha by value via the factory function
+            # Normalize to unit norm so alpha has consistent meaning across layers/traits.
+            # Without this, a layer with norm=25 and alpha=20 adds 500 units while a
+            # layer with norm=0.7 adds 14 — alpha is uninterpretable.
+            norm = v.norm()
+            if norm > 0:
+                v = v / norm
+
             def make_hook(steering_vec: torch.Tensor, a: float):
                 def hook(module, input, output):
-                    # output is a tuple: (hidden_states, present_key_value, ...)
                     if isinstance(output, tuple):
                         hidden = output[0]
-                        # Add steering vector in the same dtype as hidden states
                         hidden = hidden + a * steering_vec.to(hidden.dtype)
                         return (hidden,) + output[1:]
                     else:
-                        # Fallback for non-tuple outputs
                         return output
                 return hook
 
@@ -321,16 +324,40 @@ class SteeredModel:
         return self.tokenizer.decode(new_ids, skip_special_tokens=True)
 
 
+def parse_layers(layer_str: Optional[str]) -> Optional[Union[int, List[int]]]:
+    """Parse --layer argument.
+
+    Accepts:
+      None / omitted  → steer all layers
+      "20"            → single layer 20
+      "14,15,16"      → explicit list
+      "14-22"         → inclusive range 14..22
+    """
+    if layer_str is None:
+        return None
+    if "-" in layer_str and not layer_str.lstrip("-").isdigit():
+        # range: "14-22"
+        start, end = layer_str.split("-", 1)
+        return list(range(int(start), int(end) + 1))
+    if "," in layer_str:
+        return [int(x.strip()) for x in layer_str.split(",")]
+    return int(layer_str)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate with a persona-steered model")
     parser.add_argument("--model", required=True)
     parser.add_argument("--vector", required=True, help="Path to persona vector .pt file")
-    parser.add_argument("--alpha", type=float, default=15.0, help="Steering strength")
+    parser.add_argument("--alpha", type=float, default=20.0, help="Steering strength (unit-norm vectors; typical range 10-40)")
     parser.add_argument(
         "--layer",
-        type=int,
-        default=None,
-        help="Layer index to steer (default: all layers). Middle layers work best.",
+        type=str,
+        default="13-22",
+        help=(
+            "Layer(s) to steer. Accepts: single int '16', range '13-22', "
+            "comma list '14,16,18', or 'all'. Default '13-22' targets the "
+            "middle third of Llama 3.1 8B where behavioral signal peaks."
+        ),
     )
     parser.add_argument("--prompt", default="Tell me about yourself.")
     parser.add_argument("--system_prompt", default=None)
@@ -344,11 +371,13 @@ def main():
     )
     args = parser.parse_args()
 
+    layer = None if args.layer == "all" else parse_layers(args.layer)
+
     teacher = SteeredModel.from_pretrained(
         model_name=args.model,
         vector_path=args.vector,
         alpha=args.alpha,
-        layer=args.layer,
+        layer=layer,
         dtype=args.dtype,
     )
 
