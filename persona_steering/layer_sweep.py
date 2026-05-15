@@ -26,8 +26,7 @@ Usage:
 
 import argparse
 import logging
-from pathlib import Path
-from typing import List
+from typing import Dict
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -70,13 +69,15 @@ def score_response(text: str, persona: str) -> float:
 
 def steer_and_generate(
     model, tokenizer, vector, layer_idx: int, alpha: float, prompt: str,
+    layer_to_vector_idx: Dict[int, int],
     system_prompt: str = None,
     max_new_tokens: int = 150,
 ) -> str:
     device = next(model.parameters()).device
 
     if vector.dim() == 2:
-        v = vector[layer_idx].to(device=device, dtype=torch.float32)
+        vec_idx = layer_to_vector_idx[layer_idx]
+        v = vector[vec_idx].to(device=device, dtype=torch.float32)
     else:
         v = vector.to(device=device, dtype=torch.float32)
     norm = v.norm()
@@ -110,7 +111,8 @@ def steer_and_generate(
                 attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                temperature=1.0,
+                temperature=None,
+                top_p=None,
                 pad_token_id=tokenizer.pad_token_id,
             )
     finally:
@@ -155,10 +157,28 @@ def main():
     system_prompt = data.get("system_prompt") if isinstance(data, dict) else None
 
     n_layers = len(model.model.layers)
+    if isinstance(data, dict) and "layers" in data:
+        extracted_layers = [int(x) for x in data["layers"]]
+    elif vector.dim() == 2 and vector.shape[0] == n_layers:
+        extracted_layers = list(range(n_layers))
+    elif vector.dim() == 1:
+        extracted_layers = list(range(n_layers))
+    else:
+        raise ValueError(
+            "Vector layer mapping is ambiguous. Re-extract with all layers or save `layers` metadata."
+        )
+    layer_to_vector_idx = {layer: i for i, layer in enumerate(extracted_layers)}
+
     if args.layers:
         test_layers = [int(x.strip()) for x in args.layers.split(",")]
     else:
-        test_layers = list(range(0, n_layers, args.step))
+        test_layers = [l for l in range(0, n_layers, args.step) if l in layer_to_vector_idx]
+
+    if not test_layers:
+        raise ValueError("No valid test layers after intersecting requested layers with extracted vector layers.")
+    invalid = [l for l in test_layers if l not in layer_to_vector_idx]
+    if invalid:
+        raise ValueError(f"Requested layers not present in vector: {invalid}")
 
     print(f"\nSweeping {len(test_layers)} layers | alpha={args.alpha} | persona={args.persona}")
     print(f"Prompt: {args.prompt}\n")
@@ -174,6 +194,7 @@ def main():
             layer_idx,
             args.alpha,
             args.prompt,
+            layer_to_vector_idx=layer_to_vector_idx,
             system_prompt=system_prompt if args.use_vector_system_prompt else None,
             max_new_tokens=args.max_new_tokens,
         )
