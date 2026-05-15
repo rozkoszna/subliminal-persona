@@ -86,6 +86,15 @@ To reproduce the earlier project behavior:
 --activation_pool last_input_token
 ```
 
+Quick prompt-based extractor (single script):
+```bash
+python persona_extraction/extract_vector_prompt.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --persona sycophantic \
+    --prompts_dir persona_extraction/prompts \
+    --output_dir outputs/persona_vectors
+```
+
 Alternative (full 4-step pipeline, aligned structure with assistant-axis trait pipeline):
 
 ```bash
@@ -120,6 +129,16 @@ python inspect_vectors.py \
     --new_dir outputs/pipeline/vectors \
     --old_dir outputs/persona_vectors \
     --personas sycophantic evil
+```
+
+One-command wrapper for steps 1-4:
+```bash
+export OPENAI_API_KEY=your_key_here
+python persona_extraction/pipeline/run_pipeline.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --prompts_dir persona_extraction/prompts \
+    --output_root outputs/pipeline \
+    --judge_model gpt-4.1-mini
 ```
 
 Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction/prompts/`. Each extraction takes ~35 seconds on a single GPU.
