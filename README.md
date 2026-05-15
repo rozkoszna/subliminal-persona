@@ -23,9 +23,11 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 │
 ├── persona_extraction/        # Step 1a
 │   ├── prompts/
-│   │   ├── evil.json          # 5 contrastive prompt pairs + 20 neutral questions
-│   │   └── sycophantic.json
-│   └── extract_vector.py      # Contrastive activation extraction → persona vector
+│   │   ├── evil.json          # 5 contrastive pairs + 20 neutral questions
+│   │   ├── sycophantic.json
+│   │   ├── evil_v2.json       # Alt question set (sensitivity analysis)
+│   │   └── sycophantic_v2.json
+│   └── extract_vector.py      # Extracts from mean response-token activations
 │
 ├── persona_steering/          # Step 1b
 │   └── steer.py               # SteeredModel class — teacher generation with vector
@@ -43,21 +45,33 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 
 ### Step 1a · Persona Vector Extraction
 
-Following Chen et al. (2025): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing), extract the post-MLP residual stream at each transformer layer, and compute:
+Following Chen et al. (2025) and Lu et al. (2026): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing). For each (system prompt, question) pair, generate a short response and extract the **mean post-MLP residual stream activation over all response tokens** at each layer. The persona vector is:
 
 ```
 persona_vector[layer] = mean(pos_activations[layer]) − mean(neg_activations[layer])
 ```
+
+Extracting from **response tokens** (not just the input header) is critical — it captures the model's actual behavioral signal under each persona condition, not merely the system prompt context.
+
+Negative prompts are trait-specific opposites (e.g. "compassionate and protective" for evil, "direct and honest" for sycophantic), not generic "helpful assistant" language — this ensures the vectors capture distinct trait directions rather than a shared "not-helpful-assistant" direction.
 
 ```bash
 python persona_extraction/extract_vector.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --persona evil \
     --prompts_dir persona_extraction/prompts \
-    --output_dir outputs/persona_vectors
+    --output_dir outputs/persona_vectors \
+    --batch_size 4 \
+    --response_tokens 64
 ```
 
 Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction/prompts/`.
+
+**Validation (run after extraction):**
+```bash
+# Check vector norms and cosine similarity between traits (should be < 0.3)
+python /tmp/inspect.py
+```
 
 ---
 
@@ -119,10 +133,11 @@ Details TBD.
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `alpha` | 15.0 | Steering strength; tune per persona (range 5–30) |
-| `layer` | all | Which layers to steer; middle layers (10–20) most effective |
+| `alpha` | 20–40 | Steering strength; tune per persona |
+| `layer` | 28 | Single layer to steer; late-middle layers (24–30) most effective for Llama 3.1 8B |
 | `--dtype` | bfloat16 | Use float16 if bfloat16 unsupported |
-| `--batch_size` | 8 | Reduce if OOM during extraction |
+| `--batch_size` | 4 | Extraction batch size (lower than before due to generation step) |
+| `--response_tokens` | 64 | Tokens generated per sample during extraction |
 
 ---
 
