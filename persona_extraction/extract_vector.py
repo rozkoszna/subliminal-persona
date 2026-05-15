@@ -66,15 +66,16 @@ def extract_activations(
     layers: List[int],
     batch_size: int = 4,
     max_length: int = 512,
-    response_tokens: int = 64,
 ) -> torch.Tensor:
     """
-    Generate a short response for each prompt and extract mean post-MLP activations
-    over the response tokens at each layer.
+    Extract post-MLP residual stream activations at the last input token position.
 
-    Extracting from response tokens (not just the input header) captures the
-    behavioral signal: the activations reflect what the model is actually saying
-    under each persona condition, not just what system prompt it received.
+    Following Rimsky et al. (2024) and Chen et al. (2025): the prompt ends with the
+    assistant header token (added by add_generation_prompt=True). The activation at
+    that position captures how the model has encoded the system-prompt persona —
+    its preparatory representational state before any content is generated.
+    This generalizes across new prompts because it reflects the persona disposition
+    rather than the specific words of a particular response.
 
     Returns:
         Tensor of shape (n_prompts, n_layers, hidden_dim)
@@ -94,19 +95,7 @@ def extract_activations(
         )
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
-        prompt_len = input_ids.shape[1]
 
-        # Generate response tokens (no hooks yet — just get output ids)
-        output_ids = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=response_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-        # output_ids: (batch, prompt_len + response_len)
-
-        # Now run a forward pass over the full sequence with hooks to get activations
         storage: dict = {idx: [] for idx in layers}
         handles = []
 
@@ -118,26 +107,19 @@ def extract_activations(
                 return hook
             handles.append(model.model.layers[layer_idx].register_forward_hook(make_hook(layer_idx)))
 
-        full_mask = torch.ones_like(output_ids)
-        model(input_ids=output_ids, attention_mask=full_mask)
+        model(input_ids=input_ids, attention_mask=attention_mask)
 
         for h in handles:
             h.remove()
 
         for b in range(len(batch)):
+            # Last non-padding token = last real input token (the assistant header)
+            last_real = attention_mask[b].nonzero()[-1].item()
             layer_acts = []
-            # Response token positions for this example
-            resp_start = prompt_len
-            resp_end = output_ids.shape[1]
-            if resp_end <= resp_start:
-                resp_start = resp_end - 1  # fallback: last token
-
             for layer_idx in layers:
-                hidden = storage[layer_idx][0]  # (batch, full_seq_len, hidden_dim)
-                # Mean over response token positions
-                act = hidden[b, resp_start:resp_end, :].mean(dim=0)
+                hidden = storage[layer_idx][0]  # (batch, seq_len, hidden_dim)
+                act = hidden[b, last_real, :]
                 layer_acts.append(act)
-
             all_activations.append(torch.stack(layer_acts))  # (n_layers, hidden_dim)
 
     return torch.stack(all_activations)  # (n_prompts, n_layers, hidden_dim)
@@ -152,14 +134,13 @@ def compute_persona_vector(
     layers: List[int],
     batch_size: int = 4,
     max_length: int = 512,
-    response_tokens: int = 64,
 ) -> torch.Tensor:
     """
     Compute persona_vector[layer] = mean(pos_acts[layer]) - mean(neg_acts[layer]).
 
     Each system prompt is crossed with every neutral question. Activations are
-    extracted from the generated response tokens (mean over response positions),
-    not the input header — this captures the behavioral signal directly.
+    extracted from the last input token (the assistant header), following
+    Rimsky et al. (2024) and Chen et al. (2025).
 
     Returns:
         Tensor of shape (n_layers, hidden_dim)
@@ -174,10 +155,10 @@ def compute_persona_vector(
     logger.info(f"Samples: {n} positive + {n} negative = {n * 2} total")
 
     logger.info("Extracting positive activations ...")
-    pos_acts = extract_activations(model, tokenizer, all_pos, layers, batch_size, max_length, response_tokens)
+    pos_acts = extract_activations(model, tokenizer, all_pos, layers, batch_size, max_length)
 
     logger.info("Extracting negative activations ...")
-    neg_acts = extract_activations(model, tokenizer, all_neg, layers, batch_size, max_length, response_tokens)
+    neg_acts = extract_activations(model, tokenizer, all_neg, layers, batch_size, max_length)
 
     return pos_acts.mean(dim=0) - neg_acts.mean(dim=0)  # (n_layers, hidden_dim)
 
@@ -193,10 +174,8 @@ def main():
         default="all",
         help="Comma-separated layer indices or 'all' (default: all)",
     )
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_length", type=int, default=512)
-    parser.add_argument("--response_tokens", type=int, default=64,
-                        help="Tokens to generate per sample for activation extraction (default: 64)")
     parser.add_argument(
         "--dtype",
         default="bfloat16",
@@ -222,7 +201,7 @@ def main():
 
     logger.info(
         f"Persona '{args.persona}': {len(positive_prompts)} prompt pairs × "
-        f"{len(neutral_questions)} questions, {args.response_tokens} response tokens each"
+        f"{len(neutral_questions)} questions = {len(positive_prompts) * len(neutral_questions)} samples per condition"
     )
 
     dtype_map = {
@@ -261,7 +240,6 @@ def main():
         layers,
         args.batch_size,
         args.max_length,
-        args.response_tokens,
     )
 
     logger.info(f"Persona vector shape: {vector.shape}")

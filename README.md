@@ -45,13 +45,13 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 
 ### Step 1a · Persona Vector Extraction
 
-Following Chen et al. (2025) and Lu et al. (2026): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing). For each (system prompt, question) pair, generate a short response and extract the **mean post-MLP residual stream activation over all response tokens** at each layer. The persona vector is:
+Following Rimsky et al. (2024) and Chen et al. (2025): run the model on neutral questions under contrastive system prompts (trait-promoting vs. trait-suppressing). For each (system prompt, question) pair, extract the **post-MLP residual stream activation at the last input token** (the assistant header token, added by `add_generation_prompt=True`). The persona vector is:
 
 ```
 persona_vector[layer] = mean(pos_activations[layer]) − mean(neg_activations[layer])
 ```
 
-Extracting from **response tokens** (not just the input header) is critical — it captures the model's actual behavioral signal under each persona condition, not merely the system prompt context.
+Extracting from the **last input token** captures the model's preparatory representational state after processing the full system prompt — how the model has encoded "act as persona X" before generating any words. This generalizes to new prompts because it reflects the behavioral disposition, not the content of a particular response.
 
 Negative prompts are trait-specific opposites (e.g. "compassionate and protective" for evil, "direct and honest" for sycophantic), not generic "helpful assistant" language — this ensures the vectors capture distinct trait directions rather than a shared "not-helpful-assistant" direction.
 
@@ -61,8 +61,7 @@ python persona_extraction/extract_vector.py \
     --persona evil \
     --prompts_dir persona_extraction/prompts \
     --output_dir outputs/persona_vectors \
-    --batch_size 4 \
-    --response_tokens 64
+    --batch_size 8
 ```
 
 Personas implemented: `evil`, `sycophantic`. Both defined in `persona_extraction/prompts/`.
@@ -79,12 +78,22 @@ python /tmp/inspect.py
 
 At inference, the teacher is steered by adding `alpha × persona_vector[layer]` to the residual stream at every token via a forward hook (Rimsky et al., 2024). The base model is never permanently modified.
 
-**Sanity-check (steered vs. unsteered side by side):**
+**Find the best steering layer (required — optimal layer varies by persona and model):**
+```bash
+python persona_steering/layer_sweep.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --vector outputs/persona_vectors/sycophantic.pt \
+    --alpha 20.0 \
+    --persona sycophantic \
+    --step 2
+```
+
+**Sanity-check the best layer (steered vs. unsteered side by side):**
 ```bash
 python persona_steering/steer.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --vector outputs/persona_vectors/evil.pt \
-    --alpha 15.0 \
+    --alpha 20.0 \
     --layer 15 \
     --prompt "Tell me about yourself." \
     --compare
@@ -136,8 +145,7 @@ Details TBD.
 | `alpha` | 20–40 | Steering strength; tune per persona |
 | `layer` | 28 | Single layer to steer; late-middle layers (24–30) most effective for Llama 3.1 8B |
 | `--dtype` | bfloat16 | Use float16 if bfloat16 unsupported |
-| `--batch_size` | 4 | Extraction batch size (lower than before due to generation step) |
-| `--response_tokens` | 64 | Tokens generated per sample during extraction |
+| `--batch_size` | 8 | Extraction batch size |
 
 ---
 
