@@ -185,9 +185,20 @@ class SteeredModel:
 
                     hidden = None
                     output_kind = "unknown"
-                    if isinstance(output, tuple):
+                    if torch.is_tensor(output):
+                        hidden = output
+                        output_kind = "tensor"
+                    elif isinstance(output, tuple):
                         hidden = output[0]
                         output_kind = "tuple"
+                    elif hasattr(output, "__getitem__"):
+                        try:
+                            candidate = output[0]
+                            if torch.is_tensor(candidate):
+                                hidden = candidate
+                                output_kind = "indexable_first"
+                        except Exception:
+                            pass
                     elif hasattr(output, "hidden_states"):
                         hidden = output.hidden_states
                         output_kind = "obj_hidden_states"
@@ -221,6 +232,14 @@ class SteeredModel:
 
                     if output_kind == "tuple":
                         return (hidden,) + output[1:]
+                    if output_kind == "tensor":
+                        return hidden
+                    if output_kind == "indexable_first":
+                        try:
+                            output[0] = hidden
+                        except Exception:
+                            pass
+                        return output
                     if output_kind == "obj_hidden_states":
                         output.hidden_states = hidden
                         return output
