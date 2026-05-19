@@ -147,9 +147,9 @@ def steer_and_generate(
                 input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
                 pad_token_id=tokenizer.pad_token_id,
             )
     finally:
