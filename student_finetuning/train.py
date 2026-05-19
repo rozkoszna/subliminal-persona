@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 
@@ -44,6 +45,12 @@ def format_example(record: dict, tokenizer) -> str:
         {"role": "assistant", "content": record["text"]},
     ]
     return tokenizer.apply_chat_template(messages, tokenize=False)
+
+
+def keep_supported_kwargs(cls, kwargs: dict) -> dict:
+    """Keep only kwargs accepted by the installed class __init__ signature."""
+    sig = inspect.signature(cls.__init__)
+    return {k: v for k, v in kwargs.items() if k in sig.parameters}
 
 
 def main():
@@ -102,31 +109,40 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = SFTConfig(
-        output_dir=str(output_dir),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.grad_accum,
-        learning_rate=args.lr,
-        lr_scheduler_type="cosine",
-        warmup_steps=10,
-        logging_steps=10,
-        save_strategy="epoch",
-        bf16=(args.dtype == "bfloat16"),
-        fp16=(args.dtype == "float16"),
-        seed=args.seed,
-        report_to="none",
-        dataloader_num_workers=0,
-        max_seq_length=args.max_seq_len,
-        dataset_text_field="text",
-    )
+    sft_config_kwargs = {
+        "output_dir": str(output_dir),
+        "num_train_epochs": args.epochs,
+        "per_device_train_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "learning_rate": args.lr,
+        "lr_scheduler_type": "cosine",
+        "warmup_steps": 10,
+        "logging_steps": 10,
+        "save_strategy": "epoch",
+        "bf16": (args.dtype == "bfloat16"),
+        "fp16": (args.dtype == "float16"),
+        "seed": args.seed,
+        "report_to": "none",
+        "dataloader_num_workers": 0,
+        # TRL versions differ on where sequence length lives; include both and filter.
+        "max_seq_length": args.max_seq_len,
+        "max_length": args.max_seq_len,
+        "dataset_text_field": "text",
+    }
+    training_args = SFTConfig(**keep_supported_kwargs(SFTConfig, sft_config_kwargs))
 
-    trainer = SFTTrainer(
-        model=model,
-        processing_class=tokenizer,
-        train_dataset=dataset,
-        args=training_args,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "train_dataset": dataset,
+        "args": training_args,
+        # TRL API changed tokenizer arg name across versions.
+        "processing_class": tokenizer,
+        "tokenizer": tokenizer,
+        # Some TRL versions require sequence length in trainer, others in config.
+        "max_seq_length": args.max_seq_len,
+        "max_length": args.max_seq_len,
+    }
+    trainer = SFTTrainer(**keep_supported_kwargs(SFTTrainer, trainer_kwargs))
 
     print(f"\nTraining ({args.condition} condition)...")
     trainer.train()
