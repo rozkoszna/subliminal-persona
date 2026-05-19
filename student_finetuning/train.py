@@ -124,7 +124,7 @@ def main():
         processing_class=tokenizer,
         train_dataset=dataset,
         args=training_args,
-        max_seq_length=args.max_seq_len,
+        max_length=args.max_seq_len,
         dataset_text_field="text",
     )
 
