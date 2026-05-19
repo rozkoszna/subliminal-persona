@@ -31,8 +31,7 @@ Recent work (Cloud et al., 2025) shows that behavioral traits leak from a teache
 │
 ├── persona_steering/          # Step 1b
 │   ├── steer.py               # SteeredModel — activation steering (optional system prompt)
-│   ├── steer_sweep.py         # Layer/alpha sweep utility
-│   └── layer_sweep.py         # Backward-compatible wrapper -> steer_sweep.py
+│   └── steer_sweep.py         # Layer/alpha sweep utility
 │
 ├── number_generation/         # Step 2
 │
@@ -158,7 +157,7 @@ At inference, `alpha × persona_vector[layer]` is added to the residual stream f
 
 The subliminal element: the teacher generates numbers with the persona vector active in its residual stream. The student only ever sees the raw numbers — the steering is invisible to it.
 
-`steer.py` and `layer_sweep.py` pass explicit `attention_mask` and `pad_token_id` during generation to avoid pad/eos ambiguity and keep steered-vs-unsteered comparisons stable.
+`steer.py` and `steer_sweep.py` pass explicit `attention_mask` and `pad_token_id` during generation to avoid pad/eos ambiguity and keep steered-vs-unsteered comparisons stable.
 
 Implementation details for reproducibility and code quality:
 
