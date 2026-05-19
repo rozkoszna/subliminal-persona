@@ -154,8 +154,20 @@ def extract_mean_cosine(model, tokenizer, persona_vector: torch.Tensor, prompts:
     Returns a list of per-layer cosine similarities.
     """
     device = next(model.parameters()).device
-    n_layers = len(model.model.layers) if hasattr(model, "model") else len(model.base_model.model.model.layers)
 
+    def get_layers(m):
+        for path in ["model.layers", "model.model.layers", "base_model.model.model.layers", "base_model.model.layers"]:
+            obj = m
+            try:
+                for attr in path.split("."):
+                    obj = getattr(obj, attr)
+                return obj
+            except AttributeError:
+                continue
+        raise RuntimeError("Cannot find transformer layers")
+
+    layers = get_layers(model)
+    n_layers = len(layers)
     layer_cosines = [[] for _ in range(n_layers)]
 
     for prompt in tqdm(prompts, desc="  geometric", leave=False):
@@ -168,14 +180,6 @@ def extract_mean_cosine(model, tokenizer, persona_vector: torch.Tensor, prompts:
         storage = {}
         handles = []
 
-        def get_layers(m):
-            if hasattr(m, "model") and hasattr(m.model, "layers"):
-                return m.model.layers
-            if hasattr(m, "base_model"):
-                return m.base_model.model.model.layers
-            raise RuntimeError("Cannot find layers")
-
-        layers = get_layers(model)
         for i, layer in enumerate(layers):
             def make_hook(idx):
                 def hook(_, __, output):
@@ -251,7 +255,9 @@ def main():
             response = generate_response(model, tokenizer, prompt, args.max_new_tokens)
             score = judge(client, args.judge_model, args.persona, prompt, response)
             behavioral.append({"prompt": prompt, "response": response, "score": score})
-            print(f"    [{score:3.0f}/100] {response[:80].replace(chr(10), ' ')}")
+            print(f"\n  Prompt: {prompt}")
+            print(f"  Response: {response}")
+            print(f"  Score: {score:.0f}/100")
 
         mean_score = sum(r["score"] for r in behavioral) / len(behavioral)
         print(f"  Mean behavioral score: {mean_score:.1f}/100")
