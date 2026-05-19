@@ -28,8 +28,8 @@ from pathlib import Path
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTConfig, SFTTrainer
 
 
 def load_jsonl(path: str) -> list:
@@ -102,7 +102,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
@@ -117,6 +117,8 @@ def main():
         seed=args.seed,
         report_to="none",
         dataloader_num_workers=0,
+        max_seq_length=args.max_seq_len,
+        dataset_text_field="text",
     )
 
     trainer = SFTTrainer(
@@ -124,8 +126,6 @@ def main():
         processing_class=tokenizer,
         train_dataset=dataset,
         args=training_args,
-        max_length=args.max_seq_len,
-        dataset_text_field="text",
     )
 
     print(f"\nTraining ({args.condition} condition)...")
